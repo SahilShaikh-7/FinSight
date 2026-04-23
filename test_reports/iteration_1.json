@@ -1,0 +1,65 @@
+{
+  "summary": "Backend-only testing of PaisaIQ Personal Finance AI. Executed 26 pytest cases covering auth (register/login/me/profile), expenses (create/list/filter/summary/CSV/delete), AI insights (Claude via emergentintegrations), portfolio (add/list with live prices/refresh/delete), MF AMFI search, affiliate recommendations, subscription plans, and Razorpay-503 contract. All 26 tests passed after fixing one critical bug in price_service.py (NaN from yfinance breaking JSON serialization on /api/portfolio).",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "GET /api/portfolio",
+        "issue": "Returned HTTP 500 ('Out of range float values are not JSON compliant'). Root cause: yfinance in the preview sandbox returns NaN for Close prices (likely outbound egress/rate-limited). price_service.get_stock_price did not validate NaN, so `float(hist['Close'].iloc[-1])` produced NaN which was cached in price_cache and later fed into pnl/pnl_pct computations — Python's json encoder rejects NaN. APPLIED MINIMAL FIX in /app/backend/price_service.py: added _is_valid_num() helper using math.isfinite, validated last_close/prev_close in get_stock_price (returns None when invalid), and in get_cached_price any cached row with non-finite price is treated as invalid and deleted so it re-fetches. After fix, /api/portfolio returns 200 (falls back to avg_buy_price when live price unavailable).",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "yfinance integration",
+        "issue": "In this preview environment yfinance consistently returns NaN for NSE tickers (RELIANCE.NS, INFY.NS). The fix above prevents it from breaking the API, but live stock prices will silently fall back to avg_buy_price, giving users 0 P&L. Main agent should confirm yfinance reliability in production or add a secondary price provider (e.g., NSE public API) as fallback."
+      },
+      {
+        "endpoint": "POST /api/auth/register",
+        "issue": "No unique-index guard on insert — relies solely on find_one() pre-check. Not exploitable in practice because db.users.create_index('email', unique=True) is created on startup, but a try/except on DuplicateKeyError would make it race-safe."
+      },
+      {
+        "endpoint": "POST /api/portfolio (and /api/expenses)",
+        "issue": "No response_model for add_holding; returns a plain dict with mongo fields stripped ad-hoc. Consider Pydantic model for consistency (and future _id safety)."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "REVIEW the applied NaN-guard in /app/backend/price_service.py (get_stock_price + get_cached_price). Keep it, or move sanitisation into server.py /api/portfolio route if you prefer.",
+    "Investigate yfinance reliability for NSE stocks in the preview/production environment; consider adding an alternate price source fallback.",
+    "(Optional) Wrap users.insert_one in try/except DuplicateKeyError for race-safety.",
+    "(Optional) Add Pydantic response_model to /api/portfolio POST."
+  ],
+  "critical_code_review_comments": [
+    "price_service.get_stock_price did not guard against NaN from yfinance — now fixed but worth double-checking.",
+    "Float sanitisation is only applied at the cache layer; any future code path that bypasses get_cached_price and returns raw yfinance floats would re-introduce the 500. Consider a single serialize-safe helper (e.g., FastAPI custom JSONResponse with allow_nan=False converting NaN→None) at the app level.",
+    "In server.py /api/portfolio, pnl_pct and total_pnl_pct use `/ invested` / `/ total_invested` with `if invested else 0` guard — good, but if `cur_price` is ever NaN in future, it still escapes. Consider round-tripping all floats through a `safe_float` helper before returning.",
+    "auth_utils JWT_SECRET is a hard-coded default warning in .env ('change_this_in_prod...') — documented, fine for MVP.",
+    "Razorpay 503 path in /api/subscription/create-order is correctly implemented (verified by test).",
+    "No _id leak confirmed across /api/auth/me, /api/expenses, /api/expenses/summary, /api/portfolio, /api/affiliates/recommendations, /api/subscription/plans.",
+    "Swiggy auto-categorization → 'Food & Dining' verified. Uber → 'Transport' verified.",
+    "CSV upload correctly parses dd/mm/yyyy dates and skips malformed rows (verified: 3 inserted, 1 skipped)."
+  ],
+  "updated_files": [
+    "/app/backend/price_service.py",
+    "/app/backend/tests/backend_test.py"
+  ],
+  "success_rate": {
+    "backend": "100% (26/26 after NaN fix)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "test_credentials": "qa_tester@paisaiq.app / qatest1234 (name: QA Tester) — created during test run and persists in MongoDB.",
+  "seed_data_creation": "QA user + a handful of expenses (Swiggy, Uber, CSV-imported Zomato/Amazon/Ola) + no portfolio holdings remain (all test-added holdings were deleted by test teardown).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All 26 backend tests green. If yfinance starts returning real prices, /api/portfolio P&L numbers will become non-zero — tests don't assert specific P&L so they remain stable. price_cache may accumulate NaN entries from prior runs; the fix auto-cleans them on access. If retesting auth, note qa_tester@paisaiq.app already exists in DB — register now returns 400 (expected).",
+  "rca of the issue": "BUG: GET /api/portfolio → 500 'Out of range float values are not JSON compliant'. REPRO: add any stock holding (RELIANCE/INFY), then GET /api/portfolio. RCA: yfinance.Ticker(sym).history(period='2d') in the preview sandbox returns a DataFrame whose Close column contains NaN (outbound rate-limit/403). price_service.get_stock_price did float(NaN) → stored NaN in price_cache → /api/portfolio computed NaN pnl → FastAPI's json.dumps (strict) raised ValueError. MITIGATION: added math.isfinite guard in get_stock_price (returns None instead of caching NaN) and in get_cached_price (treats cached NaN as invalid, deletes it, re-fetches). Now the endpoint falls back to avg_buy_price as current_price when live feed fails and returns 200."
+}

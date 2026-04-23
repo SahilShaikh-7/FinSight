@@ -1,89 +1,592 @@
-from fastapi import FastAPI, APIRouter
-from dotenv import load_dotenv
+"""Main FastAPI server for Personal Finance AI."""
+import os
+import io
+import csv
+import uuid
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional, Dict, Any
+
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Request
+from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-import os
-import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
-import uuid
-from datetime import datetime, timezone
-
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field, EmailStr, ConfigDict
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+load_dotenv(ROOT_DIR / ".env")
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+from auth_utils import hash_password, verify_password, create_access_token, get_current_user
+from categorizer import categorize, is_essential
+from insight_engine import generate_all_insights, compute_financial_health_score
+from price_service import (
+    get_cached_price,
+    refresh_all_portfolio_prices,
+    refresh_amfi_cache,
+    search_mf,
+    get_mf_nav,
+)
+from affiliates import recommend as recommend_affiliates
+
+# ---------------- Setup ----------------
+mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db = client[os.environ["DB_NAME"]]
 
-# Create the main app without a prefix
-app = FastAPI()
+app = FastAPI(title="Finance AI")
+api = APIRouter(prefix="/api")
 
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
+# ---------------- Models ----------------
+class RegisterIn(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=6)
+    name: str
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+class UserOut(BaseModel):
+    id: str
+    email: str
+    name: str
+    monthly_income: float = 0
+    plan: str = "free"
+    created_at: str
 
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
+class ProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    monthly_income: Optional[float] = None
+
+class ExpenseIn(BaseModel):
+    amount: float
+    merchant: str = ""
+    category: Optional[str] = None
+    date: Optional[str] = None  # ISO
+    notes: Optional[str] = ""
+
+class ExpenseOut(BaseModel):
+    id: str
+    amount: float
+    merchant: str
+    category: str
+    date: str
+    notes: str
+    essential: bool
+    created_at: str
+
+class HoldingIn(BaseModel):
+    asset_type: str  # "stock" | "mf"
+    symbol: str
+    name: Optional[str] = ""
+    quantity: float
+    avg_buy_price: float
+    sector: Optional[str] = "Other"
+    is_sip: bool = False
+    sip_amount: Optional[float] = 0
+
+class HoldingUpdate(BaseModel):
+    quantity: Optional[float] = None
+    avg_buy_price: Optional[float] = None
+    is_sip: Optional[bool] = None
+    sip_amount: Optional[float] = None
+    sector: Optional[str] = None
+    name: Optional[str] = None
+
+class RazorpayOrderIn(BaseModel):
+    plan: str  # "basic" | "pro"
+
+# ---------------- Helpers ----------------
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+async def _user_doc(user_id: str):
+    u = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not u:
+        raise HTTPException(404, "User not found")
+    return u
+
+# ---------------- Auth ----------------
+@api.post("/auth/register", response_model=UserOut)
+async def register(data: RegisterIn):
+    existing = await db.users.find_one({"email": data.email.lower()})
+    if existing:
+        raise HTTPException(400, "Email already registered")
+    uid = str(uuid.uuid4())
+    doc = {
+        "id": uid,
+        "email": data.email.lower(),
+        "name": data.name,
+        "password_hash": hash_password(data.password),
+        "monthly_income": 0,
+        "plan": "free",
+        "created_at": now_iso(),
+    }
+    await db.users.insert_one(doc)
+    return UserOut(**{k: v for k, v in doc.items() if k != "password_hash"})
+
+@api.post("/auth/login")
+async def login(data: LoginIn):
+    u = await db.users.find_one({"email": data.email.lower()})
+    if not u or not verify_password(data.password, u["password_hash"]):
+        raise HTTPException(401, "Invalid credentials")
+    token = create_access_token(u["id"], u["email"])
+    return {
+        "token": token,
+        "user": {
+            "id": u["id"], "email": u["email"], "name": u["name"],
+            "monthly_income": u.get("monthly_income", 0), "plan": u.get("plan", "free"),
+            "created_at": u["created_at"],
+        },
+    }
+
+@api.get("/auth/me", response_model=UserOut)
+async def me(user=Depends(get_current_user)):
+    u = await _user_doc(user["id"])
+    return UserOut(**u)
+
+@api.patch("/auth/profile", response_model=UserOut)
+async def update_profile(data: ProfileUpdate, user=Depends(get_current_user)):
+    upd = {k: v for k, v in data.model_dump().items() if v is not None}
+    if upd:
+        await db.users.update_one({"id": user["id"]}, {"$set": upd})
+    u = await _user_doc(user["id"])
+    return UserOut(**u)
+
+# ---------------- Expenses ----------------
+@api.post("/expenses", response_model=ExpenseOut)
+async def create_expense(data: ExpenseIn, user=Depends(get_current_user)):
+    category = data.category or categorize(data.merchant, data.notes or "")
+    date = data.date or now_iso()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "amount": float(data.amount),
+        "merchant": data.merchant or "",
+        "category": category,
+        "date": date,
+        "notes": data.notes or "",
+        "essential": is_essential(category),
+        "created_at": now_iso(),
+    }
+    await db.expenses.insert_one(doc.copy())
+    doc.pop("user_id", None)
+    return ExpenseOut(**doc)
+
+@api.get("/expenses", response_model=List[ExpenseOut])
+async def list_expenses(
+    user=Depends(get_current_user),
+    limit: int = 500,
+    category: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+):
+    q: Dict[str, Any] = {"user_id": user["id"]}
+    if category:
+        q["category"] = category
+    if start or end:
+        dq: Dict[str, Any] = {}
+        if start: dq["$gte"] = start
+        if end: dq["$lte"] = end
+        q["date"] = dq
+    docs = await db.expenses.find(q, {"_id": 0, "user_id": 0}).sort("date", -1).to_list(limit)
+    return [ExpenseOut(**d) for d in docs]
+
+@api.delete("/expenses/{exp_id}")
+async def delete_expense(exp_id: str, user=Depends(get_current_user)):
+    r = await db.expenses.delete_one({"id": exp_id, "user_id": user["id"]})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+@api.post("/expenses/csv")
+async def upload_csv(file: UploadFile = File(...), user=Depends(get_current_user)):
+    """Accept CSV with columns: date, amount, merchant (or description), notes (optional), category (optional).
+    Handles common bank CSVs — any column containing 'amount' or 'debit' is used."""
+    content = await file.read()
+    try:
+        text = content.decode("utf-8", errors="ignore")
+    except Exception:
+        raise HTTPException(400, "Unable to read file")
+    reader = csv.DictReader(io.StringIO(text))
+    inserted = 0
+    skipped = 0
+    docs = []
+    for row in reader:
+        # Lowercase keys
+        r = {k.strip().lower(): (v or "").strip() for k, v in row.items() if k}
+        amt_str = r.get("amount") or r.get("debit") or r.get("withdrawal") or r.get("debit amount") or ""
+        amt_str = amt_str.replace(",", "").replace("₹", "").replace("INR", "").strip()
+        try:
+            amt = float(amt_str)
+            if amt <= 0:
+                skipped += 1
+                continue
+        except Exception:
+            skipped += 1
+            continue
+        merchant = r.get("merchant") or r.get("description") or r.get("narration") or r.get("particulars") or ""
+        notes = r.get("notes") or ""
+        date_str = r.get("date") or r.get("txn date") or r.get("transaction date") or now_iso()
+        # Try to normalize date
+        try:
+            if "/" in date_str:
+                # dd/mm/yyyy
+                dt = datetime.strptime(date_str.split(" ")[0], "%d/%m/%Y")
+            elif "-" in date_str and len(date_str.split("-")[0]) == 4:
+                dt = datetime.fromisoformat(date_str[:19])
+            elif "-" in date_str:
+                dt = datetime.strptime(date_str.split(" ")[0], "%d-%m-%Y")
+            else:
+                dt = datetime.now(timezone.utc)
+            dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+            date_iso = dt.isoformat()
+        except Exception:
+            date_iso = now_iso()
+        category = r.get("category") or categorize(merchant, notes)
+        docs.append({
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "amount": amt,
+            "merchant": merchant,
+            "category": category,
+            "date": date_iso,
+            "notes": notes,
+            "essential": is_essential(category),
+            "created_at": now_iso(),
+        })
+    if docs:
+        await db.expenses.insert_many(docs)
+        inserted = len(docs)
+    return {"inserted": inserted, "skipped": skipped}
+
+@api.get("/expenses/summary")
+async def expense_summary(user=Depends(get_current_user)):
+    exps = await db.expenses.find({"user_id": user["id"]}, {"_id": 0, "user_id": 0}).to_list(5000)
+    u = await _user_doc(user["id"])
+    health = compute_financial_health_score(exps, u.get("monthly_income", 0))
+    # By category
+    from collections import defaultdict
+    now = datetime.now(timezone.utc)
+    cat_totals = defaultdict(float)
+    for e in exps:
+        try:
+            dt = datetime.fromisoformat(e["date"].replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if dt.year == now.year and dt.month == now.month:
+            cat_totals[e.get("category", "Other")] += float(e["amount"])
+    top = sorted([{"category": k, "amount": round(v, 2)} for k, v in cat_totals.items()], key=lambda x: -x["amount"])
+    # Daily trend (last 30 days)
+    day_totals = defaultdict(float)
+    from datetime import timedelta
+    cutoff = now - timedelta(days=30)
+    for e in exps:
+        try:
+            dt = datetime.fromisoformat(e["date"].replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if dt >= cutoff:
+            day_totals[dt.strftime("%Y-%m-%d")] += float(e["amount"])
+    # Generate last 30 days even if zero
+    trend = []
+    for i in range(29, -1, -1):
+        d = (now - timedelta(days=i)).strftime("%Y-%m-%d")
+        trend.append({"date": d, "amount": round(day_totals.get(d, 0), 2)})
+    return {
+        "health": health,
+        "top_categories": top[:8],
+        "daily_trend": trend,
+        "total_expenses": len(exps),
+    }
+
+# ---------------- Insights ----------------
+@api.get("/insights")
+async def get_insights(user=Depends(get_current_user)):
+    exps = await db.expenses.find({"user_id": user["id"]}, {"_id": 0, "user_id": 0}).to_list(5000)
+    u = await _user_doc(user["id"])
+    result = await generate_all_insights(exps, u.get("monthly_income", 0))
+    # Cache last insights
+    await db.insights_cache.update_one(
+        {"user_id": user["id"]},
+        {"$set": {"user_id": user["id"], "data": result, "updated_at": now_iso()}},
+        upsert=True,
+    )
+    return result
+
+# ---------------- Portfolio ----------------
+@api.post("/portfolio")
+async def add_holding(data: HoldingIn, user=Depends(get_current_user)):
+    if data.asset_type not in ("stock", "mf"):
+        raise HTTPException(400, "asset_type must be stock or mf")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "asset_type": data.asset_type,
+        "symbol": data.symbol.strip().upper() if data.asset_type == "stock" else data.symbol.strip(),
+        "name": data.name or "",
+        "quantity": float(data.quantity),
+        "avg_buy_price": float(data.avg_buy_price),
+        "sector": data.sector or "Other",
+        "is_sip": data.is_sip,
+        "sip_amount": float(data.sip_amount or 0),
+        "created_at": now_iso(),
+    }
+    await db.portfolio.insert_one(doc.copy())
+    # Prefetch price
+    await get_cached_price(db, doc["asset_type"], doc["symbol"])
+    doc.pop("user_id", None)
+    return doc
+
+@api.patch("/portfolio/{hid}")
+async def update_holding(hid: str, data: HoldingUpdate, user=Depends(get_current_user)):
+    upd = {k: v for k, v in data.model_dump().items() if v is not None}
+    if upd:
+        await db.portfolio.update_one({"id": hid, "user_id": user["id"]}, {"$set": upd})
+    return {"ok": True}
+
+@api.delete("/portfolio/{hid}")
+async def delete_holding(hid: str, user=Depends(get_current_user)):
+    r = await db.portfolio.delete_one({"id": hid, "user_id": user["id"]})
+    if r.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+@api.get("/portfolio")
+async def list_portfolio(user=Depends(get_current_user), refresh: bool = False):
+    holdings = await db.portfolio.find({"user_id": user["id"]}, {"_id": 0, "user_id": 0}).to_list(500)
+    from collections import defaultdict
+    enriched = []
+    total_invested = 0.0
+    total_current = 0.0
+    sector_alloc = defaultdict(float)
+    type_alloc = defaultdict(float)
+    for h in holdings:
+        price_data = await get_cached_price(db, h["asset_type"], h["symbol"], force=refresh)
+        cur_price = float(price_data["price"]) if price_data else float(h["avg_buy_price"])
+        invested = h["quantity"] * h["avg_buy_price"]
+        current = h["quantity"] * cur_price
+        pnl = current - invested
+        pnl_pct = (pnl / invested * 100) if invested else 0
+        item = {
+            **h,
+            "current_price": round(cur_price, 2),
+            "invested": round(invested, 2),
+            "current_value": round(current, 2),
+            "pnl": round(pnl, 2),
+            "pnl_pct": round(pnl_pct, 2),
+            "last_updated": price_data.get("last_updated") if price_data else None,
+            "name": h.get("name") or (price_data.get("scheme_name") if price_data and h["asset_type"] == "mf" else h["symbol"]),
+        }
+        enriched.append(item)
+        total_invested += invested
+        total_current += current
+        sector_alloc[h.get("sector", "Other")] += current
+        type_alloc[h["asset_type"]] += current
+
+    alloc_by_sector = [{"sector": k, "value": round(v, 2), "pct": round(v / total_current * 100, 1) if total_current else 0} for k, v in sector_alloc.items()]
+    alloc_by_type = [{"type": k, "value": round(v, 2), "pct": round(v / total_current * 100, 1) if total_current else 0} for k, v in type_alloc.items()]
+
+    # Risk signals
+    risks = []
+    for s in alloc_by_sector:
+        if s["pct"] > 40:
+            risks.append({"severity": "high", "message": f"Overexposed to {s['sector']} ({s['pct']}%). Consider diversifying."})
+    if len(holdings) and len(holdings) < 3:
+        risks.append({"severity": "medium", "message": "Low diversification — fewer than 3 holdings. Consider adding more assets across sectors."})
+
+    return {
+        "holdings": enriched,
+        "summary": {
+            "total_invested": round(total_invested, 2),
+            "total_current": round(total_current, 2),
+            "total_pnl": round(total_current - total_invested, 2),
+            "total_pnl_pct": round((total_current - total_invested) / total_invested * 100, 2) if total_invested else 0,
+            "holding_count": len(holdings),
+        },
+        "allocation_by_sector": alloc_by_sector,
+        "allocation_by_type": alloc_by_type,
+        "risk_signals": risks,
+    }
+
+@api.post("/portfolio/refresh-prices")
+async def manual_refresh(user=Depends(get_current_user)):
+    holdings = await db.portfolio.find({"user_id": user["id"]}, {"_id": 0, "asset_type": 1, "symbol": 1}).to_list(500)
+    unique = {(h["asset_type"], h["symbol"]) for h in holdings}
+    updated = 0
+    for at, sym in unique:
+        r = await get_cached_price(db, at, sym, force=True)
+        if r:
+            updated += 1
+    return {"updated": updated, "total": len(unique)}
+
+@api.get("/prices/mf/search")
+async def mf_search(q: str, user=Depends(get_current_user)):
+    results = search_mf(q, limit=15)
+    return {"results": results}
+
+@api.get("/prices/mf/{scheme_code}")
+async def mf_get(scheme_code: str):
+    data = get_mf_nav(scheme_code)
+    if not data:
+        raise HTTPException(404, "Scheme not found")
+    return data
+
+# ---------------- Affiliates ----------------
+@api.get("/affiliates/recommendations")
+async def affiliate_recs(user=Depends(get_current_user)):
+    exps = await db.expenses.find({"user_id": user["id"]}, {"_id": 0, "user_id": 0}).to_list(2000)
+    return {"recommendations": recommend_affiliates(exps)}
+
+# ---------------- Subscription (Razorpay) ----------------
+PLANS = {
+    "basic": {"name": "Basic Premium", "amount_inr": 99.0, "features": ["Advanced AI insights", "Unlimited CSV uploads", "Email alerts"]},
+    "pro": {"name": "Pro", "amount_inr": 299.0, "features": ["Everything in Basic", "Investment analytics", "Predictive insights", "Priority support"]},
+}
+
+@api.get("/subscription/plans")
+async def sub_plans():
+    return {"plans": [{"id": k, **v} for k, v in PLANS.items()]}
+
+@api.post("/subscription/create-order")
+async def create_rzp_order(data: RazorpayOrderIn, user=Depends(get_current_user)):
+    if data.plan not in PLANS:
+        raise HTTPException(400, "Invalid plan")
+    key_id = os.environ.get("RAZORPAY_KEY_ID", "")
+    key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
+    if not key_id or not key_secret:
+        raise HTTPException(503, "Razorpay not configured. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in backend .env")
+    try:
+        import razorpay
+        rzp = razorpay.Client(auth=(key_id, key_secret))
+        amount_paise = int(PLANS[data.plan]["amount_inr"] * 100)
+        order = rzp.order.create({
+            "amount": amount_paise,
+            "currency": "INR",
+            "receipt": f"rcpt_{uuid.uuid4().hex[:16]}",
+            "notes": {"user_id": user["id"], "plan": data.plan},
+        })
+        await db.payment_transactions.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user["id"],
+            "plan": data.plan,
+            "order_id": order["id"],
+            "amount": PLANS[data.plan]["amount_inr"],
+            "currency": "INR",
+            "status": "created",
+            "payment_status": "pending",
+            "created_at": now_iso(),
+        })
+        return {"order_id": order["id"], "amount": amount_paise, "currency": "INR", "key_id": key_id, "plan": data.plan}
+    except Exception as e:
+        logger.exception("RZP order failed")
+        raise HTTPException(500, f"Order creation failed: {str(e)[:120]}")
+
+@api.post("/subscription/verify")
+async def verify_payment(payload: Dict[str, Any], user=Depends(get_current_user)):
+    """Verify Razorpay payment and activate plan."""
+    order_id = payload.get("razorpay_order_id")
+    payment_id = payload.get("razorpay_payment_id")
+    signature = payload.get("razorpay_signature")
+    if not all([order_id, payment_id, signature]):
+        raise HTTPException(400, "Missing fields")
+    key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
+    if not key_secret:
+        raise HTTPException(503, "Razorpay not configured")
+    import hmac, hashlib
+    expected = hmac.new(key_secret.encode(), f"{order_id}|{payment_id}".encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        await db.payment_transactions.update_one({"order_id": order_id}, {"$set": {"payment_status": "failed", "status": "failed"}})
+        raise HTTPException(400, "Invalid signature")
+    # Idempotency: only activate once
+    tx = await db.payment_transactions.find_one({"order_id": order_id})
+    if tx and tx.get("payment_status") == "paid":
+        return {"ok": True, "already_processed": True}
+    await db.payment_transactions.update_one(
+        {"order_id": order_id},
+        {"$set": {"payment_status": "paid", "status": "completed", "payment_id": payment_id, "updated_at": now_iso()}},
+    )
+    plan = (tx or {}).get("plan", "basic")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"plan": plan, "plan_activated_at": now_iso()}})
+    return {"ok": True, "plan": plan}
+
+@api.post("/webhook/razorpay")
+async def rzp_webhook(request: Request):
+    body = await request.body()
+    sig = request.headers.get("X-Razorpay-Signature", "")
+    secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
+    if secret:
+        import hmac, hashlib
+        expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            raise HTTPException(400, "Invalid webhook signature")
+    # Just log
+    import json as _json
+    try:
+        evt = _json.loads(body.decode("utf-8"))
+        logger.info(f"RZP webhook: {evt.get('event')}")
+    except Exception:
+        pass
+    return {"ok": True}
+
+# ---------------- Health ----------------
+@api.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"ok": True, "app": "Finance AI", "time": now_iso()}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
+@api.get("/health")
+async def health():
+    return {"ok": True}
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+# ---------------- Scheduler ----------------
+scheduler: Optional[AsyncIOScheduler] = None
 
-# Include the router in the main app
-app.include_router(api_router)
+@app.on_event("startup")
+async def on_startup():
+    global scheduler
+    # Indexes
+    await db.users.create_index("email", unique=True)
+    await db.users.create_index("id", unique=True)
+    await db.expenses.create_index([("user_id", 1), ("date", -1)])
+    await db.expenses.create_index([("user_id", 1), ("category", 1)])
+    await db.portfolio.create_index([("user_id", 1), ("symbol", 1)])
+    await db.price_cache.create_index("last_updated")
+    await db.payment_transactions.create_index("order_id", unique=False)
+    # Initial AMFI load (non-blocking best-effort)
+    try:
+        refresh_amfi_cache()
+    except Exception:
+        logger.warning("Initial AMFI load failed — will retry on cron")
+    # Scheduler — daily 2 AM IST (20:30 UTC)
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_job(lambda: refresh_amfi_cache(), "cron", hour=20, minute=30, id="amfi_daily")
+    scheduler.add_job(lambda: _run_async_refresh(), "cron", hour=21, minute=0, id="portfolio_daily")
+    scheduler.start()
+    logger.info("Scheduler started")
+
+def _run_async_refresh():
+    import asyncio
+    asyncio.create_task(refresh_all_portfolio_prices(db))
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    if scheduler:
+        scheduler.shutdown()
+    client.close()
+
+# ---------------- Mount ----------------
+app.include_router(api)
 
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
