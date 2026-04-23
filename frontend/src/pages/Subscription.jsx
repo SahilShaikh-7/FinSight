@@ -31,13 +31,20 @@ export default function Subscription() {
       const ok = await loadRazorpayScript();
       if (!ok) { toast.error("Could not load Razorpay"); return; }
       const r = await api.post("/subscription/create-order", { plan: planId });
+      // Admin path — instant grant, no payment
+      if (r.data?.admin_grant) {
+        toast.success(`Admin: ${planId} plan activated (no payment)`);
+        await refreshUser();
+        setLoadingPlan(null);
+        return;
+      }
       const { order_id, amount, currency, key_id } = r.data;
 
       const options = {
         key: key_id,
         amount,
         currency,
-        name: "PaisaIQ",
+        name: "FinSight",
         description: `${planId === "basic" ? "Basic" : "Pro"} Premium`,
         order_id,
         prefill: { name: user?.name, email: user?.email },

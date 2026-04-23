@@ -3,18 +3,20 @@ import os
 import io
 import csv
 import uuid
+import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import resend
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -36,11 +38,45 @@ mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
-app = FastAPI(title="Finance AI")
+app = FastAPI(title="FinSight")
 api = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").lower().strip()
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev")
+if RESEND_API_KEY:
+    resend.api_key = RESEND_API_KEY
+
+
+async def send_email_async(to: str, subject: str, html: str) -> None:
+    """Fire-and-forget Resend email."""
+    if not RESEND_API_KEY:
+        logger.warning("RESEND_API_KEY missing — skipping email")
+        return
+    try:
+        await asyncio.to_thread(resend.Emails.send, {
+            "from": SENDER_EMAIL,
+            "to": [to],
+            "subject": subject,
+            "html": html,
+        })
+        logger.info(f"Email sent to {to}: {subject}")
+    except Exception as e:
+        logger.exception(f"Email send failed to {to}: {e}")
+
+
+def is_admin_email(email: str) -> bool:
+    return ADMIN_EMAIL and email.lower().strip() == ADMIN_EMAIL
+
+
+def admin_user_overrides(email: str) -> dict:
+    """Returns extra fields if this is the admin email."""
+    if is_admin_email(email):
+        return {"is_admin": True, "plan": "pro"}
+    return {"is_admin": False}
 
 # ---------------- Models ----------------
 class RegisterIn(BaseModel):
@@ -58,6 +94,7 @@ class UserOut(BaseModel):
     name: str
     monthly_income: float = 0
     plan: str = "free"
+    is_admin: bool = False
     created_at: str
 
 class ProfileUpdate(BaseModel):
@@ -119,13 +156,15 @@ async def register(data: RegisterIn):
     if existing:
         raise HTTPException(400, "Email already registered")
     uid = str(uuid.uuid4())
+    overrides = admin_user_overrides(data.email)
     doc = {
         "id": uid,
         "email": data.email.lower(),
         "name": data.name,
         "password_hash": hash_password(data.password),
         "monthly_income": 0,
-        "plan": "free",
+        "plan": overrides.get("plan", "free"),
+        "is_admin": overrides.get("is_admin", False),
         "created_at": now_iso(),
     }
     await db.users.insert_one(doc)
@@ -136,12 +175,18 @@ async def login(data: LoginIn):
     u = await db.users.find_one({"email": data.email.lower()})
     if not u or not verify_password(data.password, u["password_hash"]):
         raise HTTPException(401, "Invalid credentials")
+    # Idempotent admin promotion
+    if is_admin_email(u["email"]) and (not u.get("is_admin") or u.get("plan") != "pro"):
+        await db.users.update_one({"id": u["id"]}, {"$set": {"is_admin": True, "plan": "pro"}})
+        u["is_admin"] = True
+        u["plan"] = "pro"
     token = create_access_token(u["id"], u["email"])
     return {
         "token": token,
         "user": {
             "id": u["id"], "email": u["email"], "name": u["name"],
             "monthly_income": u.get("monthly_income", 0), "plan": u.get("plan", "free"),
+            "is_admin": u.get("is_admin", False),
             "created_at": u["created_at"],
         },
     }
@@ -308,17 +353,121 @@ async def expense_summary(user=Depends(get_current_user)):
 
 # ---------------- Insights ----------------
 @api.get("/insights")
-async def get_insights(user=Depends(get_current_user)):
+async def get_insights(force: bool = False, user=Depends(get_current_user)):
+    # Use cache if fresh (< 60 minutes) unless force=true
+    if not force:
+        cached = await db.insights_cache.find_one({"user_id": user["id"]}, {"_id": 0})
+        if cached and cached.get("updated_at"):
+            try:
+                upd = datetime.fromisoformat(cached["updated_at"])
+                if datetime.now(timezone.utc) - upd < timedelta(minutes=60):
+                    return cached["data"]
+            except Exception:
+                pass
     exps = await db.expenses.find({"user_id": user["id"]}, {"_id": 0, "user_id": 0}).to_list(5000)
     u = await _user_doc(user["id"])
     result = await generate_all_insights(exps, u.get("monthly_income", 0))
-    # Cache last insights
     await db.insights_cache.update_one(
         {"user_id": user["id"]},
         {"$set": {"user_id": user["id"], "data": result, "updated_at": now_iso()}},
         upsert=True,
     )
     return result
+
+
+@api.get("/insights/quick")
+async def quick_insights(user=Depends(get_current_user)):
+    """Fast endpoint for dashboard — no LLM call. Pure rule-based + statistical."""
+    from insight_engine import (
+        compute_financial_health_score, detect_anomalies, detect_behavioral_patterns,
+        category_overspend, savings_opportunities, trend_analysis,
+    )
+    exps = await db.expenses.find({"user_id": user["id"]}, {"_id": 0, "user_id": 0}).to_list(5000)
+    u = await _user_doc(user["id"])
+    return {
+        "health": compute_financial_health_score(exps, u.get("monthly_income", 0)),
+        "trend": trend_analysis(exps),
+        "anomalies": detect_anomalies(exps),
+        "behavioral_patterns": detect_behavioral_patterns(exps),
+        "category_overspends": category_overspend(exps),
+        "savings_opportunities": savings_opportunities(exps),
+    }
+
+
+# ---------------- Challenge: First ₹10k Challenge ----------------
+@api.get("/challenge")
+async def get_challenge(user=Depends(get_current_user)):
+    """Gamified savings challenge for first earners.
+    Tracks total saved since signup based on (monthly_income * months_active) - total_expenses.
+    Milestones: ₹1k, ₹5k, ₹10k.
+    """
+    u = await _user_doc(user["id"])
+    income = float(u.get("monthly_income", 0))
+    created = u.get("created_at")
+    try:
+        created_dt = datetime.fromisoformat(created)
+    except Exception:
+        created_dt = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    days = max(1, (now - created_dt).days + 1)
+    months_active = max(1.0, days / 30.0)
+    expected_income = income * months_active
+
+    exps = await db.expenses.find({"user_id": user["id"]}, {"_id": 0, "amount": 1, "date": 1}).to_list(10000)
+    total_spent = 0.0
+    for e in exps:
+        try:
+            d = datetime.fromisoformat(e["date"].replace("Z", "+00:00"))
+            if d >= created_dt:
+                total_spent += float(e["amount"])
+        except Exception:
+            continue
+
+    saved = max(0.0, expected_income - total_spent) if income > 0 else 0.0
+
+    milestones = [1000, 5000, 10000]
+    achieved = [m for m in milestones if saved >= m]
+    next_m = next((m for m in milestones if saved < m), milestones[-1])
+    progress_pct = round(min(100, (saved / next_m) * 100), 1) if next_m else 100
+    is_completed = saved >= milestones[-1]
+
+    # Persist achievements (idempotent) + send email on new milestone
+    prev = await db.challenges.find_one({"user_id": user["id"]}, {"_id": 0})
+    prev_achieved = set(prev.get("achieved_milestones", [])) if prev else set()
+    new_milestones = [m for m in achieved if m not in prev_achieved]
+    if achieved != list(prev_achieved):
+        await db.challenges.update_one(
+            {"user_id": user["id"]},
+            {"$set": {"user_id": user["id"], "achieved_milestones": achieved, "saved": round(saved, 2), "updated_at": now_iso()}},
+            upsert=True,
+        )
+    # Background email per new milestone
+    for m in new_milestones:
+        asyncio.create_task(send_email_async(
+            u["email"],
+            f"🎉 You hit ₹{m:,} on FinSight!",
+            f"""<div style="font-family: Arial, sans-serif; max-width:560px; margin:0 auto;">
+                <h2 style="color:#FF5500;">Milestone unlocked: ₹{m:,} saved</h2>
+                <p>Hey {u.get('name','there')}, you just crossed <strong>₹{m:,}</strong> in lifetime savings on FinSight. Keep going!</p>
+                <p>Next stop: ₹{milestones[-1]:,}.</p>
+                <p style="margin-top:24px;color:#71717A;font-size:12px;">— FinSight · Money decisions, intelligent.</p>
+            </div>""",
+        ))
+
+    return {
+        "income_set": income > 0,
+        "monthly_income": income,
+        "days_active": days,
+        "expected_income_to_date": round(expected_income, 2),
+        "total_spent_since_signup": round(total_spent, 2),
+        "saved": round(saved, 2),
+        "milestones": milestones,
+        "achieved_milestones": achieved,
+        "next_milestone": next_m,
+        "progress_pct": progress_pct,
+        "is_completed": is_completed,
+        "new_milestones": new_milestones,
+    }
 
 # ---------------- Portfolio ----------------
 @api.post("/portfolio")
@@ -458,6 +607,11 @@ async def sub_plans():
 async def create_rzp_order(data: RazorpayOrderIn, user=Depends(get_current_user)):
     if data.plan not in PLANS:
         raise HTTPException(400, "Invalid plan")
+    # Admin gets all plans free
+    u = await _user_doc(user["id"])
+    if u.get("is_admin"):
+        await db.users.update_one({"id": user["id"]}, {"$set": {"plan": data.plan, "plan_activated_at": now_iso()}})
+        return {"admin_grant": True, "plan": data.plan}
     key_id = os.environ.get("RAZORPAY_KEY_ID", "")
     key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
     if not key_id or not key_secret:
@@ -514,6 +668,27 @@ async def verify_payment(payload: Dict[str, Any], user=Depends(get_current_user)
     )
     plan = (tx or {}).get("plan", "basic")
     await db.users.update_one({"id": user["id"]}, {"$set": {"plan": plan, "plan_activated_at": now_iso()}})
+
+    # Send confirmation email (background)
+    u = await _user_doc(user["id"])
+    plan_meta = PLANS.get(plan, {"name": plan, "amount_inr": 0})
+    asyncio.create_task(send_email_async(
+        u["email"],
+        f"FinSight · {plan_meta['name']} activated ✅",
+        f"""<div style="font-family: Arial, sans-serif; max-width:560px; margin:0 auto;">
+            <h2 style="color:#FF5500;">Payment received — you're now {plan_meta['name']}</h2>
+            <p>Hi {u.get('name','there')},</p>
+            <p>We've received your payment of <strong>₹{plan_meta['amount_inr']:.0f}</strong>. Your premium features are live.</p>
+            <table style="border-collapse:collapse;margin-top:12px;">
+              <tr><td style="padding:6px 12px;color:#71717A;">Order ID</td><td style="padding:6px 12px;"><code>{order_id}</code></td></tr>
+              <tr><td style="padding:6px 12px;color:#71717A;">Payment ID</td><td style="padding:6px 12px;"><code>{payment_id}</code></td></tr>
+              <tr><td style="padding:6px 12px;color:#71717A;">Plan</td><td style="padding:6px 12px;">{plan_meta['name']}</td></tr>
+            </table>
+            <p style="margin-top:20px;">Open FinSight to explore your new analytics →</p>
+            <p style="margin-top:24px;color:#71717A;font-size:12px;">— FinSight · Money decisions, intelligent.</p>
+        </div>""",
+    ))
+
     return {"ok": True, "plan": plan}
 
 @api.post("/webhook/razorpay")
@@ -563,6 +738,12 @@ async def on_startup():
         refresh_amfi_cache()
     except Exception:
         logger.warning("Initial AMFI load failed — will retry on cron")
+    # Auto-promote admin if exists
+    if ADMIN_EMAIL:
+        await db.users.update_one(
+            {"email": ADMIN_EMAIL},
+            {"$set": {"is_admin": True, "plan": "pro"}},
+        )
     # Scheduler — daily 2 AM IST (20:30 UTC)
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(lambda: refresh_amfi_cache(), "cron", hour=20, minute=30, id="amfi_daily")

@@ -289,11 +289,17 @@ class TestSubscription:
         plan_ids = {p["id"] for p in d["plans"]}
         assert {"basic", "pro"}.issubset(plan_ids)
 
-    def test_create_order_503_when_razorpay_missing(self, api, auth_headers):
+    def test_create_order_real_razorpay_basic(self, api, auth_headers):
+        """With real Razorpay test keys set, non-admin should get a real order."""
         r = api.post(f"{BASE_URL}/api/subscription/create-order",
                      headers=auth_headers, json={"plan": "basic"})
-        # Expected: 503 since RAZORPAY_KEY_ID is empty
-        assert r.status_code == 503, f"expected 503, got {r.status_code}: {r.text}"
+        assert r.status_code == 200, f"expected 200, got {r.status_code}: {r.text}"
+        d = r.json()
+        assert "order_id" in d and d["order_id"].startswith("order_"), d
+        assert d["amount"] == 9900  # 99 INR in paise
+        assert d["currency"] == "INR"
+        assert "key_id" in d and d["key_id"].startswith("rzp_")
+        assert d["plan"] == "basic"
 
     def test_create_order_invalid_plan(self, api, auth_headers):
         r = api.post(f"{BASE_URL}/api/subscription/create-order",
@@ -301,12 +307,132 @@ class TestSubscription:
         assert r.status_code == 400
 
 
+# -------- Iteration 2: Quick insights, Challenge, Admin, Insights cache --------
+class TestQuickInsights:
+    """GET /api/insights/quick — fast, no LLM, no ai_summary."""
+
+    def test_quick_insights_shape_and_speed(self, api, auth_headers):
+        t0 = time.time()
+        r = api.get(f"{BASE_URL}/api/insights/quick", headers=auth_headers, timeout=15)
+        elapsed = time.time() - t0
+        assert r.status_code == 200, r.text
+        d = r.json()
+        for key in ["health", "trend", "anomalies", "behavioral_patterns",
+                    "category_overspends", "savings_opportunities"]:
+            assert key in d, f"missing key {key}"
+        assert "ai_summary" not in d, "ai_summary must NOT be in /insights/quick"
+        # Should be fast (no LLM). Allow generous 10s for cold cache.
+        assert elapsed < 10, f"/insights/quick too slow: {elapsed:.1f}s"
+        assert '"_id"' not in r.text
+
+
+class TestInsightsCache:
+    def test_insights_cached_second_call_fast(self, api, auth_headers):
+        # First call may populate cache
+        r1 = api.get(f"{BASE_URL}/api/insights", headers=auth_headers, timeout=90)
+        assert r1.status_code == 200
+        t0 = time.time()
+        r2 = api.get(f"{BASE_URL}/api/insights", headers=auth_headers, timeout=30)
+        elapsed = time.time() - t0
+        assert r2.status_code == 200
+        # Cached call should be noticeably fast
+        assert elapsed < 5, f"Cached /insights too slow: {elapsed:.1f}s"
+        # force=true should still 200 (re-runs LLM; may be slower)
+        r3 = api.get(f"{BASE_URL}/api/insights?force=true", headers=auth_headers, timeout=90)
+        assert r3.status_code == 200
+
+
+class TestChallenge:
+    def test_challenge_shape(self, api, auth_headers):
+        r = api.get(f"{BASE_URL}/api/challenge", headers=auth_headers, timeout=15)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        for k in ["income_set", "monthly_income", "days_active",
+                  "expected_income_to_date", "total_spent_since_signup",
+                  "saved", "milestones", "achieved_milestones",
+                  "next_milestone", "progress_pct", "is_completed",
+                  "new_milestones"]:
+            assert k in d, f"missing key {k}"
+        assert d["milestones"] == [1000, 5000, 10000]
+        assert isinstance(d["achieved_milestones"], list)
+        assert d["saved"] >= 0
+        assert '"_id"' not in r.text
+
+    def test_challenge_reflects_income_bump(self, api, auth_headers):
+        # Bump monthly_income high enough to trigger milestones
+        rp = api.patch(f"{BASE_URL}/api/auth/profile",
+                       headers=auth_headers,
+                       json={"monthly_income": 50000})
+        assert rp.status_code == 200
+        r = api.get(f"{BASE_URL}/api/challenge", headers=auth_headers, timeout=15)
+        assert r.status_code == 200
+        d = r.json()
+        assert d["income_set"] is True
+        assert d["monthly_income"] == 50000
+        # saved == max(0, expected - spent)
+        expected = d["expected_income_to_date"] - d["total_spent_since_signup"]
+        assert d["saved"] == round(max(0.0, expected), 2) or abs(d["saved"] - max(0.0, expected)) < 1.0
+        # With 50k/mo and short signup, saved should easily be >= 1000
+        if d["saved"] >= 1000:
+            assert 1000 in d["achieved_milestones"], d
+        # progress_pct bounded
+        assert 0 <= d["progress_pct"] <= 100
+
+
+# -------- Admin --------
+@pytest.fixture(scope="session")
+def admin_user(api):
+    email = "sahil68shaikh68@gmail.com"
+    password = "admin1234"
+    # Try register (may already exist)
+    api.post(f"{BASE_URL}/api/auth/register", json={
+        "email": email, "password": password, "name": "Sahil Admin"
+    })
+    r = api.post(f"{BASE_URL}/api/auth/login", json={"email": email, "password": password})
+    assert r.status_code == 200, f"admin login failed: {r.text}"
+    data = r.json()
+    return {"token": data["token"], "user": data["user"]}
+
+
+@pytest.fixture(scope="session")
+def admin_headers(admin_user):
+    return {"Authorization": f"Bearer {admin_user['token']}", "Content-Type": "application/json"}
+
+
+class TestAdmin:
+    def test_admin_me_is_admin_and_pro(self, api, admin_headers):
+        r = api.get(f"{BASE_URL}/api/auth/me", headers=admin_headers)
+        assert r.status_code == 200, r.text
+        u = r.json()
+        assert u["is_admin"] is True, u
+        assert u["plan"] == "pro", u
+        assert "_id" not in u
+
+    def test_admin_create_order_basic_returns_admin_grant(self, api, admin_headers):
+        r = api.post(f"{BASE_URL}/api/subscription/create-order",
+                     headers=admin_headers, json={"plan": "basic"})
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d.get("admin_grant") is True, d
+        assert d.get("plan") == "basic"
+        assert "order_id" not in d  # must NOT be a razorpay order
+
+    def test_admin_create_order_pro_returns_admin_grant(self, api, admin_headers):
+        r = api.post(f"{BASE_URL}/api/subscription/create-order",
+                     headers=admin_headers, json={"plan": "pro"})
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d.get("admin_grant") is True
+        assert d.get("plan") == "pro"
+
+
 # -------- No _id leak cross-check --------
 class TestNoIdLeak:
     def test_no_mongo_id_in_common_responses(self, api, auth_headers):
         for ep in ["/api/auth/me", "/api/expenses", "/api/expenses/summary",
                    "/api/portfolio", "/api/affiliates/recommendations",
-                   "/api/subscription/plans"]:
+                   "/api/subscription/plans", "/api/insights/quick",
+                   "/api/challenge"]:
             r = api.get(f"{BASE_URL}{ep}", headers=auth_headers, timeout=60)
             assert r.status_code == 200, f"{ep} -> {r.status_code}"
             text = r.text

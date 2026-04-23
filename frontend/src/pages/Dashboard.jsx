@@ -37,21 +37,36 @@ export default function Dashboard() {
   const { user } = useAuth();
   const [summary, setSummary] = useState(null);
   const [insights, setInsights] = useState(null);
+  const [aiSummary, setAiSummary] = useState(null);
+  const [aiLoading, setAiLoading] = useState(true);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
-        const [s, i] = await Promise.all([
+        // Fast first paint: summary + quick insights (no LLM)
+        const [s, q] = await Promise.all([
           api.get("/expenses/summary"),
-          api.get("/insights"),
+          api.get("/insights/quick"),
         ]);
+        if (cancelled) return;
         setSummary(s.data);
-        setInsights(i.data);
+        setInsights(q.data);
       } catch (e) {
         console.error(e);
-      } finally { setLoading(false); }
+      } finally { if (!cancelled) setLoading(false); }
+
+      // Defer AI summary — uses cached LLM if recent
+      try {
+        const ai = await api.get("/insights");
+        if (cancelled) return;
+        setAiSummary(ai.data?.ai_summary);
+      } catch (e) {
+        // graceful
+      } finally { if (!cancelled) setAiLoading(false); }
     })();
+    return () => { cancelled = true; };
   }, []);
 
   if (loading) return <div className="text-secondary-muted" data-testid="dashboard-loading">Loading your dashboard…</div>;
@@ -178,9 +193,18 @@ export default function Dashboard() {
           <div className="flex-1 min-w-0">
             <div className="overline">AI Summary · Claude</div>
             <h3 className="font-display text-xl font-semibold mt-1">This week in your money</h3>
-            <p className="text-[color:var(--text-secondary)] mt-3 leading-relaxed whitespace-pre-wrap">
-              {insights?.ai_summary || "Add some expenses to get your first AI-powered summary."}
-            </p>
+            {aiLoading && !aiSummary ? (
+              <div className="mt-3 space-y-2" data-testid="ai-summary-skeleton">
+                <div className="h-3 w-11/12 rounded" style={{ background: "var(--bg-surface-hover)" }} />
+                <div className="h-3 w-9/12 rounded" style={{ background: "var(--bg-surface-hover)" }} />
+                <div className="h-3 w-10/12 rounded" style={{ background: "var(--bg-surface-hover)" }} />
+                <div className="text-xs text-[color:var(--text-muted)] mt-2">AI coach is thinking…</div>
+              </div>
+            ) : (
+              <p className="text-[color:var(--text-secondary)] mt-3 leading-relaxed whitespace-pre-wrap">
+                {aiSummary || "Add some expenses to get your first AI-powered summary."}
+              </p>
+            )}
           </div>
         </div>
       </div>

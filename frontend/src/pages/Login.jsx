@@ -30,7 +30,7 @@ export default function Login() {
       <div className="hidden md:flex flex-col justify-between p-12 relative overflow-hidden border-r" style={{ borderColor: "var(--border)" }}>
         <Link to="/" className="flex items-center gap-2" data-testid="login-brand">
           <div className="w-9 h-9 rounded-md grid place-items-center font-bold text-white" style={{ background: "var(--brand)" }}>₹</div>
-          <span className="font-display text-xl font-bold">PaisaIQ</span>
+          <span className="font-display text-xl font-bold">FinSight</span>
         </Link>
         <div className="relative z-10">
           <div className="overline mb-3">Welcome back</div>

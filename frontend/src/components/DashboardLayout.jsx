@@ -33,7 +33,7 @@ export default function DashboardLayout() {
         <div className="px-6 py-6 flex items-center justify-between">
           <Link to="/app/dashboard" className="flex items-center gap-2" data-testid="sidebar-logo">
             <div className="w-8 h-8 rounded-md grid place-items-center font-bold text-white" style={{ background: "var(--brand)" }}>₹</div>
-            <span className="font-display text-lg font-bold tracking-tight">PaisaIQ</span>
+            <span className="font-display text-lg font-bold tracking-tight">FinSight</span>
           </Link>
           <button className="md:hidden" onClick={() => setOpen(false)} data-testid="sidebar-close"><X size={18} /></button>
         </div>
@@ -81,7 +81,7 @@ export default function DashboardLayout() {
       <div className="flex-1 min-w-0">
         <header className="sticky top-0 z-30 glass-header px-6 py-4 flex items-center justify-between md:hidden">
           <button onClick={() => setOpen(true)} data-testid="sidebar-open"><Menu size={20} /></button>
-          <span className="font-display font-bold">PaisaIQ</span>
+          <span className="font-display font-bold">FinSight</span>
           <div style={{ width: 20 }} />
         </header>
         <main className="p-6 md:p-10 max-w-[1400px] mx-auto">

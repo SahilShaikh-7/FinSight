@@ -66,7 +66,7 @@ export default function Register() {
       <div className="hidden md:flex flex-col justify-between p-12 order-1 md:order-2 border-l" style={{ borderColor: "var(--border)" }}>
         <Link to="/" className="flex items-center gap-2">
           <div className="w-9 h-9 rounded-md grid place-items-center font-bold text-white" style={{ background: "var(--brand)" }}>₹</div>
-          <span className="font-display text-xl font-bold">PaisaIQ</span>
+          <span className="font-display text-xl font-bold">FinSight</span>
         </Link>
         <div>
           <div className="overline mb-3">Start here</div>
@@ -75,7 +75,7 @@ export default function Register() {
           </h2>
           <p className="mt-4 text-[color:var(--text-secondary)] max-w-sm">Get your Financial Health Score in under 2 minutes.</p>
         </div>
-        <div className="text-sm text-[color:var(--text-muted)]">PaisaIQ · INR-native · Made for India</div>
+        <div className="text-sm text-[color:var(--text-muted)]">FinSight · INR-native · Made for India</div>
       </div>
     </div>
   );

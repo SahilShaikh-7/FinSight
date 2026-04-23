@@ -19,7 +19,7 @@ export default function Landing() {
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2" data-testid="landing-logo">
             <div className="w-8 h-8 rounded-md grid place-items-center font-bold text-white" style={{ background: "var(--brand)" }}>₹</div>
-            <span className="font-display text-lg font-bold tracking-tight">PaisaIQ</span>
+            <span className="font-display text-lg font-bold tracking-tight">FinSight</span>
           </Link>
           <nav className="flex items-center gap-2">
             <Link to="/login" className="btn-ghost text-sm" data-testid="landing-login-btn">Login</Link>
@@ -73,7 +73,7 @@ export default function Landing() {
 
       {/* Features */}
       <section className="max-w-6xl mx-auto px-6 py-20">
-        <div className="overline mb-3">Why PaisaIQ</div>
+        <div className="overline mb-3">Why FinSight</div>
         <h2 className="font-display text-3xl md:text-5xl font-bold tracking-tight max-w-3xl">
           Built to be <em className="text-brand not-italic">uncomfortably honest</em> about your money.
         </h2>
@@ -110,7 +110,7 @@ export default function Landing() {
       </section>
 
       <footer className="border-t py-8 text-center text-sm text-[color:var(--text-muted)]" style={{ borderColor: "var(--border)" }}>
-        Made in India · © {new Date().getFullYear()} PaisaIQ
+        Made in India · © {new Date().getFullYear()} FinSight
       </footer>
     </div>
   );

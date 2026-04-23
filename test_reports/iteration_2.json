@@ -1,0 +1,55 @@
+{
+  "summary": "Backend-only testing for FinSight iteration 2. Added 8 new test cases covering /api/insights/quick (no LLM), /api/insights cache + force=true, /api/challenge (shape + milestone achievement after income bump), admin auto-promotion, and admin_grant on create-order for both plans. Plus regression tests kept (auth, expenses, insights, portfolio, MF, affiliates). Also swapped the old Razorpay-503 test to assert real-order creation with the now-configured test keys. Total 33/33 pytest cases pass.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/challenge",
+        "issue": "`days_active` uses naive (now - created_dt).days + 1 and converts to months with /30.0, so on signup-day itself months_active is clamped to 1.0 regardless of income set time. This means a freshly registered user immediately sees expected_income_to_date == monthly_income (i.e., one month of runway) on day 0. Works for gamification, but may be misleading as a 'saved' number. Consider prorating by actual days (days/30) without the max(1.0, ...) clamp, OR rename to 'income_runway' for clarity."
+      },
+      {
+        "endpoint": "GET /api/challenge",
+        "issue": "Milestone email trigger (asyncio.create_task on send_email_async) fires on every GET /challenge whenever the achieved_milestones set changes OR `new_milestones` is non-empty. Since `new_milestones` is derived from DB state comparison, emails are idempotent for existing milestones — but the DB write runs on every milestone-state change even if it's the *same* set (the `achieved != list(prev_achieved)` compares list vs list ordering; set vs list mismatch could cause spurious writes). Low impact but consider `set(achieved) != prev_achieved`."
+      },
+      {
+        "endpoint": "POST /api/subscription/create-order",
+        "issue": "When admin is granted a plan, DB is updated but no confirmation/audit record is written to payment_transactions (only real Razorpay orders get a row). Non-blocker, but auditing admin grants would be nice."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Clarify semantics of `days_active`/`months_active` in /api/challenge — currently rounds up to 1 month on day 0, so 'saved' is effectively 'monthly_income - spend' the moment income is set.",
+    "(Optional) Use set comparison instead of list comparison when detecting milestone changes in /api/challenge to avoid spurious DB writes.",
+    "(Optional) Log admin plan grants to payment_transactions with a marker like status='admin_grant' for audit."
+  ],
+  "critical_code_review_comments": [
+    "Admin auto-promotion is implemented in 3 places: startup hook, login path, and register path — good defense in depth. All three use case-insensitive compare via is_admin_email(). Verified.",
+    "/api/insights caches by user_id with 60-min TTL; force=true bypasses correctly. The cache read parses ISO datetime of updated_at — if a prior bad row has a malformed timestamp, it silently falls through to LLM re-run (safe).",
+    "/api/insights/quick returns NO ai_summary — confirmed by test, and response size is small. Good for dashboard first-paint.",
+    "Razorpay test order creation works end-to-end (order_id starts with 'order_', amount 9900 paise for basic). Payment verify path uses HMAC-SHA256 with hmac.compare_digest — correct.",
+    "No _id leaks confirmed across 8 endpoints including /api/insights/quick and /api/challenge.",
+    "send_email_async is fire-and-forget via asyncio.create_task — correctly never blocks the request path. Missing RESEND_API_KEY is handled with a warning log (graceful)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py"
+  ],
+  "success_rate": {
+    "backend": "100% (33/33)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "test_credentials": "qa_tester@paisaiq.app / qatest1234 (pre-existing), sahil68shaikh68@gmail.com / admin1234 (admin, auto-promoted)",
+  "seed_data_creation": "QA user profile updated to monthly_income=50000 (needed for challenge milestone test). Admin user validated (already existed). Test added and deleted one stock holding (RELIANCE + INFY).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All 33 pytest cases pass on the public preview URL. QA user monthly_income is now 50000 (was 85000 → 50000 by the challenge test). If retesting challenge, QA user already has achieved milestones (1000) stored in db.challenges; so `new_milestones` may be empty on subsequent calls. Admin user is persisted and admin-promoted. Razorpay keys are live test keys — real orders get created each test run under the QA user in the Razorpay dashboard (rzp_test_Sh39ZEJgvz7LPw).",
+  "rca of the issue": "No bugs found this iteration. All iteration-2 features (quick insights, insights cache with force, challenge with milestones, admin auto-promote, admin_grant subscription, real Razorpay order creation) work as specified. No _id leaks, no 500s."
+}
