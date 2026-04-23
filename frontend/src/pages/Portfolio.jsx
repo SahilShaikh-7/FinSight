@@ -113,7 +113,8 @@ export default function Portfolio() {
               <p className="text-sm text-[color:var(--text-muted)]">Add your first stock or mutual fund to get started.</p>
             </div>
           ) : (
-            <table className="w-full text-sm">
+            <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[720px]">
               <thead>
                 <tr className="text-left text-[color:var(--text-muted)] border-b" style={{ borderColor: "var(--border)" }}>
                   <th className="px-4 py-3 font-medium">Asset</th>
@@ -149,6 +150,7 @@ export default function Portfolio() {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </div>
       </div>

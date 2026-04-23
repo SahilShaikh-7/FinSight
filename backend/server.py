@@ -101,6 +101,11 @@ class ProfileUpdate(BaseModel):
     name: Optional[str] = None
     monthly_income: Optional[float] = None
 
+class ContactIn(BaseModel):
+    subject: str = Field(..., min_length=3, max_length=200)
+    message: str = Field(..., min_length=10, max_length=5000)
+    reply_email: Optional[EmailStr] = None
+
 class ExpenseIn(BaseModel):
     amount: float
     merchant: str = ""
@@ -203,6 +208,46 @@ async def update_profile(data: ProfileUpdate, user=Depends(get_current_user)):
         await db.users.update_one({"id": user["id"]}, {"$set": upd})
     u = await _user_doc(user["id"])
     return UserOut(**u)
+
+# ---------------- Contact Support ----------------
+@api.post("/contact")
+async def contact_admin(data: ContactIn, user=Depends(get_current_user)):
+    if not ADMIN_EMAIL:
+        raise HTTPException(503, "Admin contact not configured")
+    u = await _user_doc(user["id"])
+    reply_to = data.reply_email or u["email"]
+    record = {
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "from_email": u["email"],
+        "reply_email": reply_to,
+        "subject": data.subject,
+        "message": data.message,
+        "created_at": now_iso(),
+        "status": "sent" if RESEND_API_KEY else "pending_no_resend",
+    }
+    await db.contact_messages.insert_one(record.copy())
+    html = f"""<div style="font-family: Arial, sans-serif; max-width:560px; margin:0 auto;">
+        <h2 style="color:#FF5500;">New FinSight support request</h2>
+        <table style="border-collapse:collapse;margin-top:12px;font-size:14px;">
+          <tr><td style="padding:6px 12px;color:#71717A;">From</td><td style="padding:6px 12px;">{u.get('name','')} &lt;{u['email']}&gt;</td></tr>
+          <tr><td style="padding:6px 12px;color:#71717A;">Reply to</td><td style="padding:6px 12px;">{reply_to}</td></tr>
+          <tr><td style="padding:6px 12px;color:#71717A;">Subject</td><td style="padding:6px 12px;"><strong>{data.subject}</strong></td></tr>
+        </table>
+        <div style="margin-top:16px;padding:16px;background:#f7f7f7;border-left:3px solid #FF5500;white-space:pre-wrap;font-size:14px;line-height:1.55;">{data.message}</div>
+        <p style="margin-top:24px;color:#71717A;font-size:12px;">Sent via FinSight · user_id {user['id']}</p>
+    </div>"""
+    asyncio.create_task(send_email_async(ADMIN_EMAIL, f"[FinSight Support] {data.subject}", html))
+    # Confirmation to user
+    user_html = f"""<div style="font-family: Arial, sans-serif; max-width:560px; margin:0 auto;">
+        <h2 style="color:#FF5500;">We got your message</h2>
+        <p>Hi {u.get('name','')}, thanks for reaching out. Our team will reply to <strong>{reply_to}</strong> shortly.</p>
+        <p style="color:#71717A;font-size:13px;">Your message:</p>
+        <div style="padding:12px;background:#f7f7f7;border-left:3px solid #FF5500;white-space:pre-wrap;font-size:13px;">{data.message}</div>
+        <p style="margin-top:24px;color:#71717A;font-size:12px;">— FinSight Support</p>
+    </div>"""
+    asyncio.create_task(send_email_async(u["email"], "We received your FinSight support request", user_html))
+    return {"ok": True, "message": "Your message has been sent. We'll reply by email."}
 
 # ---------------- Expenses ----------------
 @api.post("/expenses", response_model=ExpenseOut)

@@ -1,0 +1,18 @@
+{
+  "short_name": "FinSight",
+  "name": "FinSight — Money Decisions, Intelligent",
+  "description": "AI-powered personal finance for students, freshers and first-salary Indians.",
+  "icons": [
+    { "src": "icon.svg", "type": "image/svg+xml", "sizes": "any" },
+    { "src": "icon-192.png", "type": "image/png", "sizes": "192x192", "purpose": "any maskable" },
+    { "src": "icon-512.png", "type": "image/png", "sizes": "512x512", "purpose": "any maskable" }
+  ],
+  "start_url": "/app/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#090A0C",
+  "background_color": "#090A0C",
+  "lang": "en-IN",
+  "categories": ["finance", "productivity", "lifestyle"]
+}

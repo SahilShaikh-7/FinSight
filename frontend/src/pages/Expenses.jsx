@@ -163,7 +163,8 @@ export default function Expenses() {
             <p className="text-sm text-[color:var(--text-muted)]">Add your first expense above or upload a CSV to get started.</p>
           </div>
         ) : (
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[600px]">
             <thead>
               <tr className="text-left text-[color:var(--text-muted)] border-b" style={{ borderColor: "var(--border)" }}>
                 <th className="px-4 py-3 font-medium">Date</th>
@@ -192,6 +193,7 @@ export default function Expenses() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
     </div>
