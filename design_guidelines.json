@@ -1,0 +1,104 @@
+{
+  "theme": "dark",
+  "archetype": "Archetype 4 (Swiss & High-Contrast)",
+  "colors": {
+    "background": {
+      "main": "#090A0C",
+      "surface": "#121316",
+      "surface_hover": "#1C1D21"
+    },
+    "text": {
+      "primary": "#F8F9FA",
+      "secondary": "#A1A1AA",
+      "muted": "#71717A"
+    },
+    "brand": {
+      "primary": "#FF5500",
+      "primary_hover": "#CC4400",
+      "accent": "#00E5FF",
+      "success": "#10B981",
+      "warning": "#F59E0B",
+      "danger": "#EF4444"
+    },
+    "border": {
+      "default": "#27272A",
+      "focus": "#FF5500"
+    }
+  },
+  "typography": {
+    "fonts": {
+      "heading": "Cabinet Grotesk",
+      "body": "Manrope",
+      "mono": "JetBrains Mono"
+    },
+    "sizes": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tighter font-bold",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight font-semibold",
+      "h3": "text-xl sm:text-2xl tracking-tight font-semibold",
+      "h4": "text-lg sm:text-xl font-medium",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm text-secondary",
+      "overline": "text-xs font-bold tracking-[0.2em] uppercase text-secondary"
+    }
+  },
+  "spacing_and_layout": {
+    "general": "Generous spacing philosophy. Use p-6, p-8, p-12. Containers with borders must have internal padding.",
+    "dashboard_grid": "The 'Control Room' Grid. Base: grid-cols-1 md:grid-cols-3 lg:grid-cols-4. Gap: gap-6. Widgets stretch to fill height.",
+    "landing_grid": "The 'Tetris' Grid. Base: grid-cols-1 md:grid-cols-8 lg:grid-cols-12. Gap: gap-8 to gap-12. Asymmetrical bento boxes.",
+    "alignment": "Mobile-first. Left-align dense content. Optical alignment over geometric."
+  },
+  "surface_strategies": {
+    "header": "Crystal Glassmorphism. backdrop-blur-xl bg-[#090A0C]/70 border-b border-white/10",
+    "dashboard_cards": "Flat solid surfaces with sharp 1px border. bg-[#121316] border-[#27272A] rounded-xl. Hover: -translate-y-1 shadow-lg shadow-black/50 border-[#FF5500]/50",
+    "buttons": "Primary: bg-[#FF5500] text-white hover:bg-[#CC4400]. Secondary: bg-transparent border border-[#27272A] text-white hover:bg-[#121316]."
+  },
+  "components": {
+    "libraries": [
+      "shadcn/ui",
+      "framer-motion",
+      "recharts",
+      "@phosphor-icons/react"
+    ],
+    "rules": {
+      "tables": "Use Shadcn Table. No outer borders, subtle row dividers. Sticky header for long lists.",
+      "charts": "Use Recharts. Tooltips must have solid dark backgrounds. Avoid standard pie charts, use donut with thick strokes.",
+      "forms": "Shadcn Form, Input, Select. High contrast focus rings (focus:ring-2 focus:ring-[#FF5500]).",
+      "cards": "Avoid default Shadcn Card padding. Use custom p-6 or p-8. No rounded-md, use rounded-xl.",
+      "navigation": "Sidebar for dashboard with Phosphor Icons (Duotone). Sticky glass header for landing."
+    }
+  },
+  "motion_and_interactions": {
+    "transitions": "transition-all duration-200 ease-out",
+    "hover": "Explicit text color on hover. Slight lift and border glow for interactive cards.",
+    "entrance": "Staggered fade-up for dashboard widgets. Parallax for landing page hero."
+  },
+  "accessibility": {
+    "contrast": "Ensure 4.5:1 for body text. Use APCA calculator guidelines.",
+    "focus": "All interactive elements must have visible focus rings.",
+    "motion": "Respect prefers-reduced-motion."
+  },
+  "testing": {
+    "attributes": "All interactive elements MUST include data-testid (e.g., data-testid='expense-add-button')."
+  },
+  "media": {
+    "image_urls": {
+      "hero_background": {
+        "url": "https://images.unsplash.com/photo-1634744536075-d22f42f88e54?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzV8MHwxfHNlYXJjaHwzfHxhYnN0cmFjdCUyMGRhcmslMjBtb2Rlcm4lMjBmaW5hbmNlJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3NzY5NzEyNTd8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Abstract dark background with curved lines for landing page hero section."
+      },
+      "dashboard_empty_state": {
+        "url": "https://images.pexels.com/photos/12955791/pexels-photo-12955791.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Dynamic trading concept to use as a faint background pattern or empty state illustration."
+      },
+      "testimonial_user_1": {
+        "url": "https://images.pexels.com/photos/3924870/pexels-photo-3924870.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Gen Z user for testimonials."
+      },
+      "testimonial_user_2": {
+        "url": "https://images.pexels.com/photos/8147476/pexels-photo-8147476.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Gen Z user for testimonials."
+      }
+    },
+    "instructions_to_main_agent": "1. Install and use @phosphor-icons/react. 2. Implement Recharts for financial health score and investment donuts. 3. Ensure deep dark mode theme (bg-[#090A0C]) across all routes. 4. Apply Cabinet Grotesk for headings and Manrope for body text via Fontshare or Google Fonts. 5. Strictly add data-testid attributes to all buttons, links, and forms. 6. Build the 'Control Room' grid layout for the main dashboard to display insights clearly. 7. DO NOT use 'Space Grotesk' or Teal colors."
+  }
+}
