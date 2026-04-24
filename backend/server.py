@@ -811,35 +811,54 @@ async def health():
 
 # ---------------- Scheduler ----------------
 scheduler: Optional[AsyncIOScheduler] = None
-
 @app.on_event("startup")
 async def on_startup():
     global scheduler
-    # Indexes
-    await db.users.create_index("email", unique=True)
-    await db.users.create_index("id", unique=True)
-    await db.expenses.create_index([("user_id", 1), ("date", -1)])
-    await db.expenses.create_index([("user_id", 1), ("category", 1)])
-    await db.portfolio.create_index([("user_id", 1), ("symbol", 1)])
-    await db.price_cache.create_index("last_updated")
-    await db.payment_transactions.create_index("order_id", unique=False)
-    # Initial AMFI load (non-blocking best-effort)
+
+    logger.info("Starting application...")
+
+    # ✅ Safe DB index creation (won't crash app)
     try:
-        refresh_amfi_cache()
-    except Exception:
-        logger.warning("Initial AMFI load failed — will retry on cron")
-    # Auto-promote admin if exists
-    if ADMIN_EMAIL:
-        await db.users.update_one(
-            {"email": ADMIN_EMAIL},
-            {"$set": {"is_admin": True, "plan": "pro"}},
-        )
-    # Scheduler — daily 2 AM IST (20:30 UTC)
-    scheduler = AsyncIOScheduler(timezone="UTC")
-    scheduler.add_job(lambda: refresh_amfi_cache(), "cron", hour=20, minute=30, id="amfi_daily")
-    scheduler.add_job(lambda: _run_async_refresh(), "cron", hour=21, minute=0, id="portfolio_daily")
-    scheduler.start()
-    logger.info("Scheduler started")
+        await db.users.create_index("email", unique=True)
+        await db.users.create_index("id", unique=True)
+        await db.expenses.create_index([("user_id", 1), ("date", -1)])
+        await db.expenses.create_index([("user_id", 1), ("category", 1)])
+        await db.portfolio.create_index([("user_id", 1), ("symbol", 1)])
+        await db.price_cache.create_index("last_updated")
+        await db.payment_transactions.create_index("order_id", unique=False)
+
+        logger.info("Database indexes created")
+
+    except Exception as e:
+        logger.warning(f"DB setup failed (non-fatal): {e}")
+
+    # ✅ Run AMFI in background (IMPORTANT FIX)
+    try:
+        asyncio.create_task(asyncio.to_thread(refresh_amfi_cache))
+    except Exception as e:
+        logger.warning(f"AMFI refresh failed: {e}")
+
+    # ✅ Admin setup (safe)
+    try:
+        if ADMIN_EMAIL:
+            await db.users.update_one(
+                {"email": ADMIN_EMAIL},
+                {"$set": {"is_admin": True, "plan": "pro"}},
+            )
+    except Exception as e:
+        logger.warning(f"Admin setup failed: {e}")
+
+    # ✅ Scheduler (safe start)
+    try:
+        scheduler = AsyncIOScheduler(timezone="UTC")
+        scheduler.add_job(lambda: refresh_amfi_cache(), "cron", hour=20, minute=30, id="amfi_daily")
+        scheduler.add_job(lambda: _run_async_refresh(), "cron", hour=21, minute=0, id="portfolio_daily")
+        scheduler.start()
+        logger.info("Scheduler started")
+    except Exception as e:
+        logger.warning(f"Scheduler failed: {e}")
+
+    logger.info("✅ Startup completed successfully")
 
 def _run_async_refresh():
     import asyncio
