@@ -805,7 +805,7 @@ async def rzp_webhook(request: Request):
 async def root():
     return {"ok": True, "app": "Finance AI", "time": now_iso()}
 
-@api.get("/health")
+@api.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"ok": True}
 
