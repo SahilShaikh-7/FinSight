@@ -102,8 +102,8 @@ export default function Dashboard() {
         </div>
 
         <div className="card-surface p-6" data-testid="kpi-month-spend">
-          <div className="overline">This month</div>
-          <div className="font-display text-3xl font-bold mt-2">{formatINR(summary?.health?.total_spend_this_month)}</div>
+          <div className="overline">Last 30 days</div>
+          <div className="font-display text-3xl font-bold mt-2">{formatINR(summary?.window_total ?? summary?.health?.total_spend_this_month)}</div>
           <div className="text-xs text-[color:var(--text-secondary)] mt-1">Total spent</div>
           <div className="mt-4 pt-4 border-t" style={{ borderColor: "var(--border)" }}>
             <div className="flex items-center gap-2 text-sm">
@@ -132,8 +132,8 @@ export default function Dashboard() {
         <div className="card-surface p-6 lg:col-span-2" data-testid="trend-chart-card">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <div className="overline">30-day spend trend</div>
-              <h3 className="font-display text-xl font-semibold mt-1">Daily flow</h3>
+              <div className="overline">Last 30 days</div>
+              <h3 className="font-display text-xl font-semibold mt-1">Daily spend</h3>
             </div>
           </div>
           <div style={{ width: "100%", height: 260 }}>
@@ -152,7 +152,7 @@ export default function Dashboard() {
         </div>
 
         <div className="card-surface p-6" data-testid="category-donut-card">
-          <div className="overline">Top categories</div>
+          <div className="overline">Top categories · 30d</div>
           <h3 className="font-display text-xl font-semibold mt-1 mb-4">Where it goes</h3>
           {topCats.length === 0 ? (
             <div className="text-sm text-[color:var(--text-secondary)] py-8 text-center">No expenses yet.</div>

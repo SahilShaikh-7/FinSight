@@ -1,6 +1,7 @@
 """Main FastAPI server for Personal Finance AI."""
 import os
 import io
+import re
 import csv
 import uuid
 import asyncio
@@ -297,86 +298,128 @@ async def delete_expense(exp_id: str, user=Depends(get_current_user)):
 
 @api.post("/expenses/csv")
 async def upload_csv(file: UploadFile = File(...), user=Depends(get_current_user)):
-    """Accept CSV with columns: date, amount, merchant (or description), notes (optional), category (optional).
-    Handles common bank CSVs — any column containing 'amount' or 'debit' is used."""
+    """Accept bank-statement CSVs. Recognised columns (case-insensitive):
+      - Date columns: date, txn date, transaction date, value date, posting date
+      - Amount (debit): amount, debit, withdrawal, debit amount, dr
+      - Merchant/description: remarks, description, narration, particulars, merchant, details
+      - Notes (optional): notes, memo
+    Rows with only a 'Credit' value and no debit are treated as income and skipped.
+    """
     content = await file.read()
     try:
         text = content.decode("utf-8", errors="ignore")
     except Exception:
         raise HTTPException(400, "Unable to read file")
-    reader = csv.DictReader(io.StringIO(text))
+    # Sniff delimiter (comma or tab)
+    sample = text[:2048]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+    except Exception:
+        class _D:
+            delimiter = ","
+        dialect = _D()
+    reader = csv.DictReader(io.StringIO(text), dialect=dialect)
     inserted = 0
     skipped = 0
     docs = []
-    for row in reader:
-        # Lowercase keys
-        r = {k.strip().lower(): (v or "").strip() for k, v in row.items() if k}
-        amt_str = r.get("amount") or r.get("debit") or r.get("withdrawal") or r.get("debit amount") or ""
-        amt_str = amt_str.replace(",", "").replace("₹", "").replace("INR", "").strip()
+
+    def _to_float(s: str) -> float:
+        if s is None:
+            return 0.0
+        s = str(s).strip().replace(",", "").replace("₹", "").replace("INR", "").replace("Rs.", "").replace("Rs", "").strip()
+        # Strip Dr/Cr suffix
+        s_lower = s.lower()
+        if s_lower.endswith("dr") or s_lower.endswith("cr") or s_lower.endswith("(dr)") or s_lower.endswith("(cr)"):
+            s = re.sub(r"\s*\(?(dr|cr)\)?$", "", s, flags=re.IGNORECASE).strip()
+        if not s or s in ("-", "NA", "N/A"):
+            return 0.0
         try:
-            amt = float(amt_str)
-            if amt <= 0:
-                skipped += 1
-                continue
+            return float(s)
         except Exception:
+            return 0.0
+
+    def _parse_date(s: str) -> str:
+        if not s:
+            return now_iso()
+        s = str(s).strip().split(" ")[0]
+        fmts = ["%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y",
+                "%d %b %Y", "%d-%b-%Y", "%d-%b-%y", "%d %B %Y", "%m/%d/%Y"]
+        for f in fmts:
+            try:
+                dt = datetime.strptime(s, f)
+                return dt.replace(tzinfo=timezone.utc).isoformat()
+            except Exception:
+                continue
+        try:
+            dt = datetime.fromisoformat(s[:19])
+            return dt.replace(tzinfo=timezone.utc).isoformat()
+        except Exception:
+            return now_iso()
+
+    for row in reader:
+        r = {str(k).strip().lower(): (v or "").strip() for k, v in row.items() if k}
+        # Amount: prefer debit; fallback to amount
+        amt_str = r.get("debit") or r.get("withdrawal") or r.get("debit amount") or r.get("dr") or r.get("amount") or ""
+        amt = _to_float(amt_str)
+        if amt <= 0:
+            # Skip credits / blank / balance-only rows
             skipped += 1
             continue
-        merchant = r.get("merchant") or r.get("description") or r.get("narration") or r.get("particulars") or ""
-        notes = r.get("notes") or ""
-        date_str = r.get("date") or r.get("txn date") or r.get("transaction date") or now_iso()
-        # Try to normalize date
-        try:
-            if "/" in date_str:
-                # dd/mm/yyyy
-                dt = datetime.strptime(date_str.split(" ")[0], "%d/%m/%Y")
-            elif "-" in date_str and len(date_str.split("-")[0]) == 4:
-                dt = datetime.fromisoformat(date_str[:19])
-            elif "-" in date_str:
-                dt = datetime.strptime(date_str.split(" ")[0], "%d-%m-%Y")
-            else:
-                dt = datetime.now(timezone.utc)
-            dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
-            date_iso = dt.isoformat()
-        except Exception:
-            date_iso = now_iso()
+        merchant = (
+            r.get("remarks") or r.get("description") or r.get("narration")
+            or r.get("particulars") or r.get("merchant") or r.get("details") or r.get("transaction details") or ""
+        )
+        notes = r.get("notes") or r.get("memo") or ""
+        date_str = r.get("date") or r.get("txn date") or r.get("transaction date") or r.get("value date") or r.get("posting date") or ""
+        date_iso = _parse_date(date_str)
         category = r.get("category") or categorize(merchant, notes)
         docs.append({
             "id": str(uuid.uuid4()),
             "user_id": user["id"],
             "amount": amt,
-            "merchant": merchant,
+            "merchant": merchant[:200],
             "category": category,
             "date": date_iso,
-            "notes": notes,
+            "notes": notes[:500],
             "essential": is_essential(category),
             "created_at": now_iso(),
         })
     if docs:
         await db.expenses.insert_many(docs)
         inserted = len(docs)
+    # Invalidate insights cache for this user so fresh data is used
+    await db.insights_cache.delete_one({"user_id": user["id"]})
     return {"inserted": inserted, "skipped": skipped}
 
 @api.get("/expenses/summary")
-async def expense_summary(user=Depends(get_current_user)):
+async def expense_summary(user=Depends(get_current_user), window: str = "30d"):
+    """Return dashboard summary.
+    window='30d' (default) uses rolling last-30-days — best for uploaded bank statements.
+    window='month' uses current calendar month only.
+    """
     exps = await db.expenses.find({"user_id": user["id"]}, {"_id": 0, "user_id": 0}).to_list(5000)
     u = await _user_doc(user["id"])
     health = compute_financial_health_score(exps, u.get("monthly_income", 0))
-    # By category
     from collections import defaultdict
+    from datetime import timedelta
     now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=30)
+
     cat_totals = defaultdict(float)
+    window_total = 0.0
     for e in exps:
         try:
             dt = datetime.fromisoformat(e["date"].replace("Z", "+00:00"))
         except Exception:
             continue
-        if dt.year == now.year and dt.month == now.month:
+        in_window = (dt >= cutoff) if window == "30d" else (dt.year == now.year and dt.month == now.month)
+        if in_window:
             cat_totals[e.get("category", "Other")] += float(e["amount"])
+            window_total += float(e["amount"])
     top = sorted([{"category": k, "amount": round(v, 2)} for k, v in cat_totals.items()], key=lambda x: -x["amount"])
-    # Daily trend (last 30 days)
+
+    # Daily trend — last 30 days
     day_totals = defaultdict(float)
-    from datetime import timedelta
-    cutoff = now - timedelta(days=30)
     for e in exps:
         try:
             dt = datetime.fromisoformat(e["date"].replace("Z", "+00:00"))
@@ -384,13 +427,15 @@ async def expense_summary(user=Depends(get_current_user)):
             continue
         if dt >= cutoff:
             day_totals[dt.strftime("%Y-%m-%d")] += float(e["amount"])
-    # Generate last 30 days even if zero
     trend = []
     for i in range(29, -1, -1):
         d = (now - timedelta(days=i)).strftime("%Y-%m-%d")
         trend.append({"date": d, "amount": round(day_totals.get(d, 0), 2)})
+
     return {
         "health": health,
+        "window": window,
+        "window_total": round(window_total, 2),
         "top_categories": top[:8],
         "daily_trend": trend,
         "total_expenses": len(exps),
