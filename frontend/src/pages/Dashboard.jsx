@@ -91,9 +91,14 @@ export default function Dashboard() {
           <HealthRing score={summary?.health?.score ?? 0} />
           <div className="flex-1 min-w-0">
             <div className="overline mb-1">Financial Health Score</div>
-            <h3 className="font-display text-2xl font-semibold">Your money fitness</h3>
+            <h3 className="font-display text-2xl font-semibold">
+              {summary?.health?.label || "Your money fitness"}
+            </h3>
             <p className="text-sm text-[color:var(--text-secondary)] mt-2 leading-relaxed">
-              Based on your savings rate ({summary?.health?.savings_rate}%), spending stability and essential-vs-want mix.
+              {summary?.health?.income_set
+                ? <>Based on ₹{summary.health.monthly_income?.toLocaleString("en-IN")} income · savings rate {summary?.health?.savings_rate}% · 30-day spend ₹{summary?.health?.total_spend_30d?.toLocaleString("en-IN")}</>  
+                : <span className="text-yellow-400">⚠ Set your monthly income in Settings for an accurate score.</span>
+              }
             </p>
             <Link to="/app/insights" data-testid="health-see-insights" className="inline-flex items-center gap-2 mt-4 text-sm text-brand font-semibold">
               See insights <ArrowRight size={14} />

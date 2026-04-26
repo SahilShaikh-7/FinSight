@@ -107,6 +107,11 @@ class ProfileUpdate(BaseModel):
     name: Optional[str] = None
     monthly_income: Optional[float] = None  # type: ignore
 
+    def get_updates(self) -> dict:
+        """Return only fields that were explicitly set (including 0)."""
+        return {k: v for k, v in self.model_dump().items()
+                if v is not None or k == "monthly_income" and v == 0}
+
 class ContactIn(BaseModel):  # type: ignore
     subject: str = Field(..., min_length=3, max_length=200)  # type: ignore
     message: str = Field(..., min_length=10, max_length=5000)
@@ -209,9 +214,17 @@ async def me(user=Depends(get_current_user)):
 
 @api.patch("/auth/profile", response_model=UserOut)
 async def update_profile(data: ProfileUpdate, user=Depends(get_current_user)):
-    upd = {k: v for k, v in data.model_dump().items() if v is not None}  # type: ignore
+    # Build update dict: include all explicitly set fields, INCLUDING monthly_income=0
+    raw = data.model_dump()  # type: ignore
+    upd = {}
+    if raw.get("name") is not None:
+        upd["name"] = raw["name"]
+    if raw.get("monthly_income") is not None:  # type: ignore
+        upd["monthly_income"] = float(raw["monthly_income"])  # type: ignore
     if upd:  # type: ignore
         await db.users.update_one({"id": user["id"]}, {"$set": upd})  # type: ignore
+        # Invalidate insights cache so health score recalculates with new income
+        await db.insights_cache.delete_one({"user_id": user["id"]})
     u = await _user_doc(user["id"])
     return UserOut(**u)
 

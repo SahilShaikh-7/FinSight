@@ -25,55 +25,100 @@ def _parse_date(d):
 
 
 def compute_financial_health_score(expenses: List[Dict[str, Any]], monthly_income: float = 0) -> Dict[str, Any]:
-    """Score 0-100 based on:
-      - savings rate (40 pts)
-      - spending stability (30 pts) — inverse of coefficient of variation
-      - essential vs non-essential ratio (30 pts)
+    """Score 0-100 based on 3 pillars:
+      1. Savings rate vs income      — 40 pts  (requires monthly_income to be set)
+      2. Spending stability           — 30 pts  (stdev of daily spend last 30 days)
+      3. Essential vs wants ratio     — 30 pts  (50-70% essential = ideal)
+
+    Uses a ROLLING 30-day window so bank statement uploads are always meaningful,
+    regardless of what calendar month the data is from.
     """
     if not expenses:
-        return {"score": 50, "savings_rate": 0, "stability": 0, "essential_ratio": 0, "breakdown": {}}
+        return {
+            "score": 50, "savings_rate": 0, "stability": 50, "essential_ratio": 0,
+            "breakdown": {"savings_pts": 0, "stability_pts": 15, "essential_pts": 15},
+            "total_spend_30d": 0, "monthly_income": monthly_income,
+            "label": "No data yet",
+        }
 
     now = datetime.now(timezone.utc)
-    # Current month expenses
-    this_month = [e for e in expenses if _parse_date(e["date"]).month == now.month and _parse_date(e["date"]).year == now.year]
-    total_spend = sum(float(e["amount"]) for e in this_month)
+    cutoff_30 = now - timedelta(days=30)
 
-    # Savings rate
-    savings_rate = 0.0
+    # ── Rolling 30-day expenses ──────────────────────────────────────────────
+    last_30 = [e for e in expenses if _parse_date(e["date"]) >= cutoff_30]
+
+    # If no recent data (e.g. old CSV upload), use the most recent 30 entries
+    if not last_30:
+        sorted_exp = sorted(expenses, key=lambda e: _parse_date(e["date"]), reverse=True)
+        last_30 = sorted_exp[:min(30, len(sorted_exp))]
+
+    total_spend = sum(float(e["amount"]) for e in last_30)
+
+    # ── Pillar 1: Savings Rate (40 pts) ─────────────────────────────────────
     if monthly_income > 0:
         savings_rate = max(0.0, min(1.0, (monthly_income - total_spend) / monthly_income))
-    savings_pts = savings_rate * 40
+        # Progressive scoring:
+        # >40% saved = 40pts, 20-40% = 30pts, 10-20% = 20pts, 0-10% = 10pts, negative = 0
+        if savings_rate >= 0.4:
+            savings_pts = 40.0
+        elif savings_rate >= 0.2:
+            savings_pts = 30.0 + (savings_rate - 0.2) / 0.2 * 10
+        elif savings_rate >= 0.1:
+            savings_pts = 20.0 + (savings_rate - 0.1) / 0.1 * 10
+        elif savings_rate > 0:
+            savings_pts = savings_rate / 0.1 * 20
+        else:
+            savings_pts = 0.0  # spending more than income
+    else:
+        # No income set → neutral 20 pts (encourages user to set income)
+        savings_rate = 0.0
+        savings_pts = 20.0
 
-    # Stability — stdev of daily spends (last 30 days)
+    # ── Pillar 2: Spending Stability (30 pts) ────────────────────────────────
     daily: DefaultDict[str, float] = defaultdict(float)
-    cutoff = now - timedelta(days=30)
-    for e in expenses:
+    for e in last_30:
         d = _parse_date(e["date"])
-        if d >= cutoff:
-            daily[d.strftime("%Y-%m-%d")] += float(e["amount"])  # type: ignore
+        daily[d.strftime("%Y-%m-%d")] += float(e["amount"])  # type: ignore
     vals = list(daily.values())
-    if len(vals) >= 2 and mean(vals) > 0:  # type: ignore
+    if len(vals) >= 3 and mean(vals) > 0:  # type: ignore
         cv = pstdev(vals) / mean(vals)  # type: ignore
+        # cv=0 (perfectly flat) → 30 pts; cv≥1.5 (very erratic) → 0 pts
         stability_pts = max(0.0, (1 - min(cv, 1.5) / 1.5)) * 30
     else:
-        stability_pts = 15.0
+        stability_pts = 15.0  # not enough data — neutral
 
-    # Essential ratio
-    essential_amt = sum(float(e["amount"]) for e in this_month if is_essential(e.get("category", "")))
-    essential_ratio = essential_amt / total_spend if total_spend > 0 else 0
-    # Ideal 50-70% essential
+    # ── Pillar 3: Essential vs Wants Ratio (30 pts) ──────────────────────────
+    essential_amt = sum(float(e["amount"]) for e in last_30 if is_essential(e.get("category", "")))
+    essential_ratio = essential_amt / total_spend if total_spend > 0 else 0.5
+    # Ideal: 50-70% essential (balanced spending)
     if 0.5 <= essential_ratio <= 0.7:
-        essential_pts = 30
+        essential_pts = 30.0          # perfect
     elif 0.4 <= essential_ratio < 0.5 or 0.7 < essential_ratio <= 0.8:
-        essential_pts = 22
-    elif essential_ratio < 0.4:
-        essential_pts = 10  # lots of wants
+        essential_pts = 22.0          # slightly off
+    elif 0.3 <= essential_ratio < 0.4:
+        essential_pts = 12.0          # too many wants
+    elif essential_ratio > 0.8:
+        essential_pts = 15.0          # almost no wants (bare survival)
     else:
-        essential_pts = 15  # too skewed to essentials (low savings headroom)
+        essential_pts = 5.0           # almost all wants
 
     score = round(savings_pts + stability_pts + essential_pts)  # type: ignore
+    score = max(0, min(100, score))
+
+    # Human-readable label
+    if score >= 80:
+        label = "Excellent"
+    elif score >= 65:
+        label = "Good"
+    elif score >= 50:
+        label = "Fair"
+    elif score >= 35:
+        label = "Needs attention"
+    else:
+        label = "At risk"
+
     return {
-        "score": max(0, min(100, score)),
+        "score": score,
         "savings_rate": round(savings_rate * 100, 1),  # type: ignore
         "stability": round(stability_pts / 30 * 100, 1),  # type: ignore
         "essential_ratio": round(essential_ratio * 100, 1),  # type: ignore
@@ -82,8 +127,13 @@ def compute_financial_health_score(expenses: List[Dict[str, Any]], monthly_incom
             "stability_pts": round(stability_pts, 1),  # type: ignore
             "essential_pts": round(essential_pts, 1),  # type: ignore
         },
-        "total_spend_this_month": round(total_spend, 2),  # type: ignore
+        "total_spend_30d": round(total_spend, 2),  # type: ignore
+        "total_spend_this_month": round(total_spend, 2),  # type: ignore  # keep for compatibility
+        "monthly_income": monthly_income,
+        "label": label,
+        "income_set": monthly_income > 0,
     }
+
 
 
 def detect_anomalies(expenses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
