@@ -191,7 +191,7 @@ export default function Dashboard() {
             <Sparkles size={20} />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="overline">AI Summary · Claude</div>
+            <div className="overline">AI Summary · Groq Llama 3.3</div>
             <h3 className="font-display text-xl font-semibold mt-1">This week in your money</h3>
             {aiLoading && !aiSummary ? (
               <div className="mt-3 space-y-2" data-testid="ai-summary-skeleton">

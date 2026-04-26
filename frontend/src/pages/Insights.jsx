@@ -14,15 +14,19 @@ export default function Insights() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  const load = async () => {
+  const load = async (force = false) => {
     setLoading(true);
-    try { const r = await api.get("/insights"); setData(r.data); }
+    try { 
+      const url = force ? "/insights?force=true" : "/insights";
+      const r = await api.get(url); 
+      setData(r.data); 
+    }
     catch (e) { toast.error("Failed to generate insights"); }
     finally { setLoading(false); setRefreshing(false); }
   };
   useEffect(() => { load(); }, []);
 
-  const refresh = async () => { setRefreshing(true); await load(); toast.success("Insights refreshed"); };
+  const refresh = async () => { setRefreshing(true); await load(true); toast.success("Insights refreshed"); };
 
   if (loading && !data) return <div className="text-secondary-muted" data-testid="insights-loading">Generating insights…</div>;
 
@@ -32,7 +36,7 @@ export default function Insights() {
         <div>
           <div className="overline">AI Insights</div>
           <h1 className="font-display text-3xl md:text-4xl font-bold tracking-tight mt-1">Your money, <span className="text-brand">decoded</span></h1>
-          <p className="text-[color:var(--text-secondary)] mt-2 max-w-xl">Rule-based + statistical detection + Claude Sonnet 4.5 summaries.</p>
+          <p className="text-[color:var(--text-secondary)] mt-2 max-w-xl">Rule-based + statistical detection + Groq Llama 3.3 summaries.</p>
         </div>
         <button onClick={refresh} disabled={refreshing} data-testid="insights-refresh-btn" className="btn-ghost inline-flex items-center gap-2 text-sm">
           <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} /> Refresh
@@ -46,7 +50,7 @@ export default function Insights() {
             <Sparkles size={20} />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="overline">AI coach · Claude Sonnet 4.5</div>
+            <div className="overline">AI coach · Groq Llama 3.3</div>
             <p className="text-[color:var(--text-primary)] mt-3 leading-relaxed whitespace-pre-wrap">
               {data?.ai_summary || "Add expenses to unlock personalized advice."}
             </p>

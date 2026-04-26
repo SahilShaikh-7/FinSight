@@ -4,7 +4,7 @@ import { ArrowRight, Sparkles, TrendingUp, Shield, LineChart, Zap, Brain } from 
 
 const features = [
   { icon: Brain, title: "Money Decision Engine", body: "Not another expense tracker. We tell you why you're overspending and what to do about it." },
-  { icon: Sparkles, title: "AI Insights", body: "Claude-powered weekly summaries + rule-based anomaly detection in INR." },
+  { icon: Sparkles, title: "AI Insights", body: "Groq Llama-powered weekly summaries + rule-based anomaly detection in INR." },
   { icon: LineChart, title: "Investment Tracking", body: "Live NAV from AMFI and free stock prices. SIP-aware portfolio with P&L." },
   { icon: TrendingUp, title: "Financial Health Score", body: "A single 0-100 number that captures your savings rate, stability and spending mix." },
   { icon: Zap, title: "CSV Superpowers", body: "Drop your bank statement. Auto-categorised in seconds — Swiggy, Zomato, Amazon included." },
