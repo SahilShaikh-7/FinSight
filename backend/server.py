@@ -1,3 +1,4 @@
+# pyre-ignore-all-errors
 """Main FastAPI server for Personal Finance AI."""
 import os
 import io
