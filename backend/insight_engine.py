@@ -165,122 +165,205 @@ def detect_anomalies(expenses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def detect_behavioral_patterns(expenses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Detect late-night, weekend spikes, impulse (small frequent) spending."""
+    """Detect late-night, weekend spikes, impulse (small frequent) spending.
+    
+    NOTE: Bank CSV imports store dates without times (midnight UTC = 00:00:00).
+    Time-based patterns (late night) are ONLY computed when >= 20% of transactions
+    have a real time component (hour != 0 OR minute != 0 OR second != 0).
+    """
     patterns = []
     now = datetime.now(timezone.utc)
     last_30 = [e for e in expenses if _parse_date(e["date"]) >= now - timedelta(days=30)]
+    if not last_30:
+        # Fall back to most recent transactions if no recent data
+        sorted_exp = sorted(expenses, key=lambda e: _parse_date(e["date"]), reverse=True)
+        last_30 = sorted_exp[:min(50, len(sorted_exp))]
     if not last_30:
         return []
 
     total = sum(float(e["amount"]) for e in last_30)
 
-    # Late night (10pm-4am)
-    late_night = [e for e in last_30 if _parse_date(e["date"]).hour >= 22 or _parse_date(e["date"]).hour <= 4]
-    ln_amt = sum(float(e["amount"]) for e in late_night)
-    if total > 0 and ln_amt / total > 0.15:
-        patterns.append({
-            "type": "late_night",
-            "severity": "medium",
-            "message": f"You spent ₹{ln_amt:.0f} ({ln_amt/total*100:.0f}%) during late-night hours. Late-night spends are often impulse buys.",
-            "count": len(late_night),
-        })
+    # ── Detect if transactions have real time data ────────────────────────────
+    # Bank CSV imports store dates at midnight (00:00:00 UTC) — no real time info.
+    # We only trust time-based patterns if >= 20% txns have a non-midnight time.
+    def _has_time(e: Dict[str, Any]) -> bool:
+        d = _parse_date(e["date"])
+        return not (d.hour == 0 and d.minute == 0 and d.second == 0)
 
-    # Weekend spikes
+    txns_with_time = [e for e in last_30 if _has_time(e)]
+    time_data_available = len(txns_with_time) / len(last_30) >= 0.2
+
+    # Late night (10pm–4am) — only when real time data exists
+    if time_data_available:
+        late_night = [e for e in txns_with_time
+                      if _parse_date(e["date"]).hour >= 22 or _parse_date(e["date"]).hour <= 4]
+        ln_amt = sum(float(e["amount"]) for e in late_night)
+        if total > 0 and ln_amt / total > 0.15:
+            patterns.append({
+                "type": "late_night",
+                "severity": "medium",
+                "message": f"You spent ₹{ln_amt:.0f} ({ln_amt/total*100:.0f}%) during late-night hours. Late-night spends are often impulse buys.",
+                "count": len(late_night),
+            })
+
+    # ── Weekend spikes ────────────────────────────────────────────────────────
     weekend = [e for e in last_30 if _parse_date(e["date"]).weekday() >= 5]
     we_amt = sum(float(e["amount"]) for e in weekend)
     weekday_amt = total - we_amt
-    if weekday_amt > 0 and we_amt / max(weekday_amt, 1) > 0.6:
+    # Only flag if weekend spend is >60% MORE than weekday spend (per-day adjusted)
+    weekday_days = max(1, 30 - 8)  # ~22 weekdays in a month
+    weekend_days = max(1, 8)        # ~8 weekend days in a month
+    we_per_day = we_amt / weekend_days
+    wd_per_day = weekday_amt / weekday_days
+    if wd_per_day > 0 and we_per_day > wd_per_day * 1.6:
         patterns.append({
             "type": "weekend_spike",
             "severity": "medium",
-            "message": f"Weekends account for ₹{we_amt:.0f} — {(we_amt/total)*100:.0f}% of your spend. Watch out for weekend splurges.",
+            "message": f"You spend ₹{we_per_day:.0f}/day on weekends vs ₹{wd_per_day:.0f}/day on weekdays — a {(we_per_day/wd_per_day-1)*100:.0f}% spike. Watch weekend splurges.",
         })
 
-    # Impulse — many small non-essential spends
+    # ── Impulse — many small non-essential spends ─────────────────────────────
     impulse = [e for e in last_30 if float(e["amount"]) < 500 and not is_essential(e.get("category", ""))]
-    if len(impulse) >= 15:
+    if len(impulse) >= 10:  # lowered from 15 to be more sensitive
         imp_amt = sum(float(e["amount"]) for e in impulse)
         patterns.append({
             "type": "impulse",
             "severity": "low" if imp_amt < 3000 else "medium",
-            "message": f"{len(impulse)} small non-essential buys (₹{imp_amt:.0f} total). These add up — try a 24-hour cooling-off rule.",
+            "message": f"{len(impulse)} small non-essential purchases (₹{imp_amt:.0f} total). These add up every month — try a 24-hour cooling-off rule.",
         })
     return patterns
 
 
 def category_overspend(expenses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Compare this month vs avg of previous 3 months per category."""
+    """Compare last 30 days vs the prior 30-60 and 60-90 day windows per category.
+    
+    Uses rolling windows instead of calendar months so it works correctly
+    with bank CSV uploads that may cover historical periods.
+    """
     now = datetime.now(timezone.utc)
-    this_mo_key = (now.year, now.month)
-    by_month_cat: DefaultDict[Tuple[int, int], DefaultDict[str, float]] = defaultdict(lambda: defaultdict(float))  # type: ignore
+    w0_start = now - timedelta(days=30)   # last 30 days
+    w1_start = now - timedelta(days=60)   # prior 30-60 days
+    w2_start = now - timedelta(days=90)   # prior 60-90 days
+
+    by_cat_now:  DefaultDict[str, float] = defaultdict(float)
+    by_cat_w1:   DefaultDict[str, float] = defaultdict(float)
+    by_cat_w2:   DefaultDict[str, float] = defaultdict(float)
+
     for e in expenses:
         d = _parse_date(e["date"])
-        by_month_cat[(d.year, d.month)][e.get("category", "Other")] += float(e["amount"])
+        cat = e.get("category", "Other")
+        amt = float(e["amount"])
+        if d >= w0_start:
+            by_cat_now[cat] += amt
+        elif d >= w1_start:
+            by_cat_w1[cat] += amt
+        elif d >= w2_start:
+            by_cat_w2[cat] += amt
 
-    this_mo = by_month_cat.get(this_mo_key, {})
-    # Previous 3 months
-    prev_months = []
-    for i in range(1, 4):
-        m = now.month - i
-        y = now.year
-        while m <= 0:
-            m += 12
-            y -= 1
-        prev_months.append((y, m))
+    # If current window is empty, shift all windows back by 30 days
+    # (handles case where uploaded CSV is older than 30 days)
+    if not by_cat_now:
+        by_cat_now  = by_cat_w1
+        by_cat_w1   = by_cat_w2
+        by_cat_w2   = defaultdict(float)  # type: ignore
+
     insights = []
-    for cat, amt in this_mo.items():  # type: ignore
-        prev_amts = [by_month_cat.get(pm, {}).get(cat, 0) for pm in prev_months]
-        prev_avg = mean(prev_amts) if prev_amts else 0
-        if prev_avg > 0 and amt > prev_avg * 1.3:
+    for cat, amt in by_cat_now.items():  # type: ignore
+        prev_amts = [v for v in [by_cat_w1.get(cat, 0), by_cat_w2.get(cat, 0)] if v > 0]
+        if not prev_amts:
+            continue
+        prev_avg = mean(prev_amts)  # type: ignore
+        if prev_avg > 0 and amt > prev_avg * 1.25:  # 25% over avg = flag
             diff = amt - prev_avg
+            pct  = (amt / prev_avg - 1) * 100
             insights.append({
                 "type": "overspend",
-                "severity": "high" if amt > prev_avg * 1.6 else "medium",
+                "severity": "high" if pct > 60 else "medium",
                 "category": cat,
-                "this_month": round(amt, 2),  # type: ignore
+                "this_period": round(amt, 2),  # type: ignore
                 "prev_avg": round(prev_avg, 2),  # type: ignore
-                "message": f"{cat} spend of ₹{amt:.0f} is {((amt/prev_avg-1)*100):.0f}% higher than your 3-month average (₹{prev_avg:.0f}). You could save ₹{diff:.0f}.",
+                "message": f"{cat}: ₹{amt:.0f} this period is {pct:.0f}% higher than your recent average (₹{prev_avg:.0f}). You're over by ₹{diff:.0f}.",
             })
-    return insights
+    return sorted(insights, key=lambda x: -x.get("this_period", 0))[:5]  # top 5
 
 
 def savings_opportunities(expenses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Find specific, actionable savings ideas."""
+    """Find specific, actionable savings ideas based on the user's actual top spend categories."""
     now = datetime.now(timezone.utc)
     last_30 = [e for e in expenses if _parse_date(e["date"]) >= now - timedelta(days=30)]
+
+    # Use most recent data if no recent expenses (e.g. old CSV)
+    if not last_30:
+        sorted_exp = sorted(expenses, key=lambda e: _parse_date(e["date"]), reverse=True)
+        last_30 = sorted_exp[:min(50, len(sorted_exp))]
+
     ops = []
+    if not last_30:
+        return ops
 
-    # Food delivery suggestion
-    food_delivery = [e for e in last_30 if e.get("category") == "Food & Dining"]
-    fd_amt = sum(float(e["amount"]) for e in food_delivery)
-    if fd_amt > 3000:
-        potential = fd_amt * 0.4
+    # Build category totals
+    cat_totals: DefaultDict[str, float] = defaultdict(float)
+    for e in last_30:
+        cat_totals[e.get("category", "Other")] += float(e["amount"])
+
+    total_spend = sum(cat_totals.values())
+
+    # ── Food & Dining ─────────────────────────────────────────────────────────
+    food_amt = cat_totals.get("Food & Dining", 0)
+    if food_amt > 2000:  # lowered threshold
+        potential = food_amt * 0.35
         ops.append({
             "type": "saving",
-            "severity": "high",
-            "message": f"You spent ₹{fd_amt:.0f} on food delivery in 30 days. Cooking 3 meals/week at home could save ~₹{potential:.0f}.",
+            "severity": "high" if food_amt > 5000 else "medium",
+            "category": "Food & Dining",
+            "message": f"₹{food_amt:.0f} on Food & Dining in 30 days. Cooking at home 3x/week could save ~₹{potential:.0f}/month.",
         })
 
-    # Entertainment subscriptions duplicate
-    ent = [e for e in last_30 if e.get("category") == "Entertainment"]
-    if len(ent) >= 3:
-        ent_amt = sum(float(e["amount"]) for e in ent)
+    # ── Entertainment / Subscriptions ─────────────────────────────────────────
+    ent_amt = cat_totals.get("Entertainment", 0)
+    ent_count = sum(1 for e in last_30 if e.get("category") == "Entertainment")
+    if ent_count >= 2 or ent_amt > 500:
         ops.append({
             "type": "saving",
             "severity": "medium",
-            "message": f"You have {len(ent)} entertainment charges (₹{ent_amt:.0f}). Audit subscriptions — most users save ₹300-600/month by cutting duplicates.",
+            "category": "Entertainment",
+            "message": f"₹{ent_amt:.0f} on Entertainment ({ent_count} transactions). Audit subscriptions — cancelling 1-2 unused ones saves ₹300-600/month.",
         })
 
-    # Shopping
-    shop = [e for e in last_30 if e.get("category") == "Shopping"]
-    shop_amt = sum(float(e["amount"]) for e in shop)
-    if shop_amt > 5000:
+    # ── Shopping ──────────────────────────────────────────────────────────────
+    shop_amt = cat_totals.get("Shopping", 0)
+    if shop_amt > 3000:  # lowered from 5000
         ops.append({
             "type": "saving",
-            "severity": "medium",
-            "message": f"Shopping of ₹{shop_amt:.0f} this month. Try a 1-week no-shopping challenge to save ~₹{shop_amt*0.3:.0f}.",
+            "severity": "medium" if shop_amt < 8000 else "high",
+            "category": "Shopping",
+            "message": f"₹{shop_amt:.0f} on Shopping this period. A 1-week no-shopping challenge could save ~₹{shop_amt*0.3:.0f}.",
         })
-    return ops
+
+    # ── Transport ─────────────────────────────────────────────────────────────
+    transport_amt = cat_totals.get("Transport", 0)
+    if transport_amt > 2000:
+        ops.append({
+            "type": "saving",
+            "severity": "low",
+            "category": "Transport",
+            "message": f"₹{transport_amt:.0f} on Transport. Carpooling or monthly passes could cut this by 20-30%.",
+        })
+
+    # ── Generic top-category tip (always show something useful) ───────────────
+    if not ops and cat_totals:
+        top_cat = max(cat_totals, key=lambda c: cat_totals[c])  # type: ignore
+        top_amt = cat_totals[top_cat]
+        pct = top_amt / total_spend * 100 if total_spend > 0 else 0
+        if pct > 30:  # top category is >30% of spend
+            ops.append({
+                "type": "saving",
+                "severity": "low",
+                "category": top_cat,
+                "message": f"{top_cat} is your biggest expense at ₹{top_amt:.0f} ({pct:.0f}% of total). Even a 10% reduction saves ₹{top_amt*0.1:.0f}/month.",
+            })
+
+    return ops[:4]  # max 4 suggestions
 
 
 def trend_analysis(expenses: List[Dict[str, Any]]) -> Dict[str, Any]:
