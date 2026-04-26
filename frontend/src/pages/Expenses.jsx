@@ -75,10 +75,10 @@ export default function Expenses() {
   };
 
   const downloadSample = () => {
-    const csv = "date,amount,merchant,notes\n" +
-      "2026-01-15,250,Swiggy,Dinner\n" +
-      "2026-01-16,1200,BigBasket,Weekly groceries\n" +
-      "2026-01-16,99,Netflix,Monthly subscription\n";
+    const csv = "Sr No,Date,Remarks,Debit,Credit,Balance Amount\n" +
+      "1,15/01/2026,UPI/Swiggy/Dinner,250.00,,10450.00\n" +
+      "2,16/01/2026,POS/BigBasket,1200.00,,9250.00\n" +
+      "3,16/01/2026,Salary Transfer,,15000.00,24250.00\n";
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a"); a.href = url; a.download = "sample_expenses.csv"; a.click();
@@ -108,12 +108,12 @@ export default function Expenses() {
       <form onSubmit={onSubmit} className="card-surface p-6" data-testid="expense-add-form">
         <div className="overline mb-4">Quick add</div>
         <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
-          <input required type="number" step="0.01" placeholder="₹ Amount" value={form.amount}
+          <input required type="number" step="0.01" placeholder="₹ Debit Amount" value={form.amount}
             onChange={(e) => setForm({ ...form, amount: e.target.value })}
             data-testid="expense-amount-input"
             className="bg-transparent border rounded-lg px-3 py-2.5 outline-none focus:ring-2 focus:ring-[color:var(--brand)]"
             style={{ borderColor: "var(--border)" }} />
-          <input placeholder="Merchant (e.g. Swiggy)" value={form.merchant}
+          <input placeholder="Remarks / Details" value={form.merchant}
             onChange={(e) => setForm({ ...form, merchant: e.target.value })}
             data-testid="expense-merchant-input"
             className="md:col-span-2 bg-transparent border rounded-lg px-3 py-2.5 outline-none focus:ring-2 focus:ring-[color:var(--brand)]"
