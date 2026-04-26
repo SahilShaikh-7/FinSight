@@ -314,15 +314,25 @@ async def upload_csv(file: UploadFile = File(...), user=Depends(get_current_user
         text = content.decode("utf-8", errors="ignore")
     except Exception:
         raise HTTPException(400, "Unable to read file")
-    # Sniff delimiter (comma or tab)
-    sample = text[:2048]
+    # Skip preamble lines to find header (Bank statements often have account info at the top)
+    lines = text.splitlines()
+    start_idx = 0
+    for i, line in enumerate(lines[:50]): # check first 50 lines max
+        line_lower = line.lower()
+        if "debit" in line_lower or "amount" in line_lower or "withdrawal" in line_lower or "dr" in line_lower:
+            start_idx = i
+            break
+            
+    clean_text = "\n".join(lines[start_idx:])
+    sample = clean_text[:2048]
+    
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
     except Exception:
         class _D:
             delimiter = ","
         dialect = _D()
-    reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+    reader = csv.DictReader(io.StringIO(clean_text), dialect=dialect)
     inserted = 0
     skipped = 0
     docs = []
@@ -475,7 +485,8 @@ async def get_insights(force: bool = False, user=Depends(get_current_user)):
         logger.info(f"Generating insights for user {user['id']}: {len(exps)} expenses, \u20b9{u.get('monthly_income', 0)} income")
         
         # Generate all insights (includes AI summary)
-        result = await generate_all_insights(exps, u.get("monthly_income", 0))
+        tier = u.get("tier", "standard").lower()
+        result = await generate_all_insights(exps, u.get("monthly_income", 0), tier)
         
         # Cache the result
         try:

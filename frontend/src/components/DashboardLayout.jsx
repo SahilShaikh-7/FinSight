@@ -26,18 +26,18 @@ export default function DashboardLayout() {
     <div className="min-h-screen flex text-[color:var(--text-primary)]" style={{ background: "var(--bg-main)" }}>
       {/* Sidebar */}
       <aside
-        className={`fixed md:static inset-y-0 left-0 z-40 w-64 border-r transform transition-transform md:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}
+        className={`fixed md:sticky top-0 shrink-0 h-screen flex flex-col z-40 w-64 border-r transform transition-transform md:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}
         style={{ background: "var(--bg-surface)", borderColor: "var(--border)" }}
         data-testid="sidebar"
       >
-        <div className="px-6 py-6 flex items-center justify-between">
+        <div className="px-6 py-6 flex items-center justify-between shrink-0">
           <Link to="/app/dashboard" className="flex items-center gap-2" data-testid="sidebar-logo">
             <div className="w-8 h-8 rounded-md grid place-items-center font-bold text-white" style={{ background: "var(--brand)" }}>₹</div>
             <span className="font-display text-lg font-bold tracking-tight">FinSight</span>
           </Link>
           <button className="md:hidden" onClick={() => setOpen(false)} data-testid="sidebar-close"><X size={18} /></button>
         </div>
-        <nav className="px-3 space-y-1">
+        <nav className="px-3 space-y-1 flex-1 overflow-y-auto">
           {nav.map((n) => {
             const Icon = n.icon;
             return (
@@ -60,7 +60,7 @@ export default function DashboardLayout() {
             );
           })}
         </nav>
-        <div className="absolute bottom-0 left-0 right-0 p-4 border-t" style={{ borderColor: "var(--border)" }}>
+        <div className="p-4 border-t shrink-0" style={{ borderColor: "var(--border)", background: "var(--bg-surface)" }}>
           <div className="flex items-center gap-3 mb-3">
             <div className="w-9 h-9 rounded-full grid place-items-center font-semibold" style={{ background: "var(--bg-surface-hover)" }}>
               {(user?.name || "U").charAt(0).toUpperCase()}

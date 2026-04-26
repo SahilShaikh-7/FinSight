@@ -336,7 +336,7 @@ Keep it simple, direct, and focused on Indian financial context."""
             logger.exception(f"AI summary generation failed: {error_type}: {error_str}")
             return f"AI summary unavailable: {error_type}"
 
-async def generate_all_insights(expenses: List[Dict[str, Any]], monthly_income: float = 0) -> Dict[str, Any]:
+async def generate_all_insights(expenses: List[Dict[str, Any]], monthly_income: float = 0, tier: str = "standard") -> Dict[str, Any]:
     """Generate comprehensive financial insights with AI summary.
     
     Computes all insights (health, anomalies, patterns, trends, savings) and calls
@@ -350,7 +350,7 @@ async def generate_all_insights(expenses: List[Dict[str, Any]], monthly_income: 
     Returns:
         Dictionary with health, trend, anomalies, patterns, overspends, savings, ai_summary
     """
-    logger.info(f"Generating insights for {len(expenses)} expenses, income=₹{monthly_income}")
+    logger.info(f"Generating insights for {len(expenses)} expenses, income=₹{monthly_income}, tier={tier}")
     
     try:
         # Compute all statistical insights (synchronous, fast)
@@ -374,8 +374,11 @@ async def generate_all_insights(expenses: List[Dict[str, Any]], monthly_income: 
             "anomaly_count": len(anomalies),
         }
         
-        # Generate LLM summary (with error handling)
-        llm_summary = await generate_llm_summary(summary_ctx)
+        # Generate LLM summary (with error handling and paywall restrict)
+        if tier not in ["premium", "pro"]:
+            llm_summary = "Upgrade to Premium or Pro to unlock personalized Groq AI financial coaching and insights."
+        else:
+            llm_summary = await generate_llm_summary(summary_ctx)
         
         result = {
             "health": health,
