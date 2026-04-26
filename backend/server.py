@@ -488,7 +488,8 @@ async def get_insights(force: bool = False, user=Depends(get_current_user)):
         logger.info(f"Generating insights for user {user['id']}: {len(exps)} expenses, \u20b9{u.get('monthly_income', 0)} income")
         
         # Generate all insights (includes AI summary)
-        tier = u.get("tier", "standard").lower()
+        # NOTE: DB field is "plan", not "tier" — "free","basic","pro" are the values
+        tier = u.get("plan", "free").lower().strip()
         result = await generate_all_insights(exps, u.get("monthly_income", 0), tier)
         
         # Cache the result
@@ -756,6 +757,8 @@ async def create_rzp_order(data: RazorpayOrderIn, user=Depends(get_current_user)
     u = await _user_doc(user["id"])
     if u.get("is_admin"):
         await db.users.update_one({"id": user["id"]}, {"$set": {"plan": data.plan, "plan_activated_at": now_iso()}})  # type: ignore
+        # Clear insights cache so admin sees AI insights immediately
+        await db.insights_cache.delete_one({"user_id": user["id"]})
         return {"admin_grant": True, "plan": data.plan}
     key_id = os.environ.get("RAZORPAY_KEY_ID", "")
     key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")  # type: ignore
@@ -814,6 +817,8 @@ async def verify_payment(payload: Dict[str, Any], user=Depends(get_current_user)
     )  # type: ignore
     plan = (tx or {}).get("plan", "basic")
     await db.users.update_one({"id": user["id"]}, {"$set": {"plan": plan, "plan_activated_at": now_iso()}})
+    # Clear insights cache so newly upgraded user sees AI insights immediately
+    await db.insights_cache.delete_one({"user_id": user["id"]})
 
     # Send confirmation email (background)
     u = await _user_doc(user["id"])

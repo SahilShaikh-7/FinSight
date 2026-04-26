@@ -374,8 +374,11 @@ async def generate_all_insights(expenses: List[Dict[str, Any]], monthly_income: 
             "anomaly_count": len(anomalies),
         }
         
-        # Generate LLM summary (with error handling and paywall restrict)
-        if tier not in ["premium", "pro"]:
+        # Generate LLM summary (with paywall gate)
+        # DB plan values: "free" = free tier, "basic" = Basic Premium, "pro" = Pro
+        # Both "basic" and "pro" paid plans get full AI insights
+        PAID_PLANS = {"basic", "pro"}
+        if tier not in PAID_PLANS:
             llm_summary = "Upgrade to Premium or Pro to unlock personalized Groq AI financial coaching and insights."
         else:
             llm_summary = await generate_llm_summary(summary_ctx)
