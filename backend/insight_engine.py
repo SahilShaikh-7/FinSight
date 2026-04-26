@@ -2,13 +2,15 @@
 Generates actionable insights like overspending, anomalies, trends, behavioral patterns.
 """
 import os
+import asyncio
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from statistics import mean, pstdev
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple, DefaultDict
 import logging
+import groq  # type: ignore
 
-from categorizer import is_essential, ESSENTIAL_CATEGORIES
+from categorizer import is_essential, ESSENTIAL_CATEGORIES  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +45,15 @@ def compute_financial_health_score(expenses: List[Dict[str, Any]], monthly_incom
     savings_pts = savings_rate * 40
 
     # Stability — stdev of daily spends (last 30 days)
-    daily = defaultdict(float)
+    daily: DefaultDict[str, float] = defaultdict(float)
     cutoff = now - timedelta(days=30)
     for e in expenses:
         d = _parse_date(e["date"])
         if d >= cutoff:
-            daily[d.strftime("%Y-%m-%d")] += float(e["amount"])
+            daily[d.strftime("%Y-%m-%d")] += float(e["amount"])  # type: ignore
     vals = list(daily.values())
-    if len(vals) >= 2 and mean(vals) > 0:
-        cv = pstdev(vals) / mean(vals)
+    if len(vals) >= 2 and mean(vals) > 0:  # type: ignore
+        cv = pstdev(vals) / mean(vals)  # type: ignore
         stability_pts = max(0.0, (1 - min(cv, 1.5) / 1.5)) * 30
     else:
         stability_pts = 15.0
@@ -69,35 +71,35 @@ def compute_financial_health_score(expenses: List[Dict[str, Any]], monthly_incom
     else:
         essential_pts = 15  # too skewed to essentials (low savings headroom)
 
-    score = round(savings_pts + stability_pts + essential_pts)
+    score = round(savings_pts + stability_pts + essential_pts)  # type: ignore
     return {
         "score": max(0, min(100, score)),
-        "savings_rate": round(savings_rate * 100, 1),
-        "stability": round(stability_pts / 30 * 100, 1),
-        "essential_ratio": round(essential_ratio * 100, 1),
+        "savings_rate": round(savings_rate * 100, 1),  # type: ignore
+        "stability": round(stability_pts / 30 * 100, 1),  # type: ignore
+        "essential_ratio": round(essential_ratio * 100, 1),  # type: ignore
         "breakdown": {
-            "savings_pts": round(savings_pts, 1),
-            "stability_pts": round(stability_pts, 1),
-            "essential_pts": round(essential_pts, 1),
+            "savings_pts": round(savings_pts, 1),  # type: ignore
+            "stability_pts": round(stability_pts, 1),  # type: ignore
+            "essential_pts": round(essential_pts, 1),  # type: ignore
         },
-        "total_spend_this_month": round(total_spend, 2),
+        "total_spend_this_month": round(total_spend, 2),  # type: ignore
     }
 
 
 def detect_anomalies(expenses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Z-score anomaly detection per category."""
-    by_cat = defaultdict(list)
+    by_cat: DefaultDict[str, List[Dict[str, Any]]] = defaultdict(list)
     for e in expenses:
         by_cat[e.get("category", "Other")].append(e)
 
-    anomalies = []
+    anomalies: List[Dict[str, Any]] = []
     for cat, items in by_cat.items():
         if len(items) < 5:
             continue
         amounts = [float(i["amount"]) for i in items]
         mu = mean(amounts)
         sd = pstdev(amounts) or 1
-        for it in items[-20:]:
+        for it in items[-20:]:  # type: ignore
             z = (float(it["amount"]) - mu) / sd
             if z >= 2.0:
                 anomalies.append({
@@ -109,7 +111,7 @@ def detect_anomalies(expenses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "date": it["date"],
                     "message": f"Unusual spend of ₹{it['amount']:.0f} at {it.get('merchant','') or cat} — {z:.1f}σ above your usual {cat} spend.",
                 })
-    return anomalies[:10]
+    return anomalies[:10]  # type: ignore
 
 
 def detect_behavioral_patterns(expenses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -160,7 +162,7 @@ def category_overspend(expenses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Compare this month vs avg of previous 3 months per category."""
     now = datetime.now(timezone.utc)
     this_mo_key = (now.year, now.month)
-    by_month_cat = defaultdict(lambda: defaultdict(float))
+    by_month_cat: DefaultDict[Tuple[int, int], DefaultDict[str, float]] = defaultdict(lambda: defaultdict(float))  # type: ignore
     for e in expenses:
         d = _parse_date(e["date"])
         by_month_cat[(d.year, d.month)][e.get("category", "Other")] += float(e["amount"])
@@ -176,7 +178,7 @@ def category_overspend(expenses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             y -= 1
         prev_months.append((y, m))
     insights = []
-    for cat, amt in this_mo.items():
+    for cat, amt in this_mo.items():  # type: ignore
         prev_amts = [by_month_cat.get(pm, {}).get(cat, 0) for pm in prev_months]
         prev_avg = mean(prev_amts) if prev_amts else 0
         if prev_avg > 0 and amt > prev_avg * 1.3:
@@ -185,8 +187,8 @@ def category_overspend(expenses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "type": "overspend",
                 "severity": "high" if amt > prev_avg * 1.6 else "medium",
                 "category": cat,
-                "this_month": round(amt, 2),
-                "prev_avg": round(prev_avg, 2),
+                "this_month": round(amt, 2),  # type: ignore
+                "prev_avg": round(prev_avg, 2),  # type: ignore
                 "message": f"{cat} spend of ₹{amt:.0f} is {((amt/prev_avg-1)*100):.0f}% higher than your 3-month average (₹{prev_avg:.0f}). You could save ₹{diff:.0f}.",
             })
     return insights
@@ -234,7 +236,7 @@ def savings_opportunities(expenses: List[Dict[str, Any]]) -> List[Dict[str, Any]
 def trend_analysis(expenses: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Compare total spend month-over-month."""
     now = datetime.now(timezone.utc)
-    by_month = defaultdict(float)
+    by_month: DefaultDict[Tuple[int, int], float] = defaultdict(float)  # type: ignore
     for e in expenses:
         d = _parse_date(e["date"])
         by_month[(d.year, d.month)] += float(e["amount"])
@@ -243,68 +245,166 @@ def trend_analysis(expenses: List[Dict[str, Any]]) -> Dict[str, Any]:
     prev = by_month.get((prev_y, prev_m), 0)
     pct = ((cur - prev) / prev * 100) if prev > 0 else 0
     return {
-        "current_month_spend": round(cur, 2),
-        "previous_month_spend": round(prev, 2),
-        "change_pct": round(pct, 1),
+        "current_month_spend": round(cur, 2),  # type: ignore
+        "previous_month_spend": round(prev, 2),  # type: ignore
+        "change_pct": round(pct, 1),  # type: ignore
         "trend": "up" if pct > 5 else "down" if pct < -5 else "steady",
     }
 
 
-async def generate_llm_summary(insights_data: Dict[str, Any]) -> str:
-    """Use Claude Sonnet 4.5 via emergentintegrations to produce a friendly summary."""
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-        import uuid as _uuid
-        key = os.environ.get("EMERGENT_LLM_KEY")
-        if not key:
-            return "Set EMERGENT_LLM_KEY to get AI-powered summaries."
-        chat = LlmChat(
-            api_key=key,
-            session_id=f"insight-{_uuid.uuid4()}",
-            system_message=(
-                "You are a personal finance coach for young Indians (students, freshers). "
-                "You give actionable, friendly, specific advice in INR. "
-                "Keep responses under 120 words, use ₹ symbol, avoid jargon, sound warm but honest."
-            ),
-        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
-        prompt = (
-            "Based on this user's finance data, write a short motivating summary + 2 concrete next-step "
-            "recommendations. Do NOT use markdown bullets or headers, just flowing text.\n\n"
-            f"Data: {insights_data}"
-        )
-        response = await chat.send_message(UserMessage(text=prompt))
-        return response.strip()
-    except Exception as e:
-        logger.exception("LLM summary failed")
-        return f"(AI summary unavailable: {str(e)[:60]}) Based on your data, focus on reducing your top non-essential category this month."
+# Global state for Groq model (lazy initialization)
+_groq_api_key = None
+_client = None
+_initialized = False
 
+def _initialize_groq():
+    """Initialize Groq client on first use (lazy initialization)."""
+    global _groq_api_key, _client, _initialized
+    
+    if _initialized:
+        return  # Already tried initialization
+    
+    _initialized = True
+    _groq_api_key = os.getenv("GROQ_API_KEY")
+    
+    if not _groq_api_key:
+        logger.warning("GROQ_API_KEY not set — LLM summaries disabled")
+        return
+    
+    try:
+        _client = groq.AsyncGroq(api_key=_groq_api_key)
+        logger.info("✅ Groq client initialized")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Groq client: {e}")
+
+
+async def generate_llm_summary(insights_data: dict) -> str:
+    """Generate AI summary using Groq with proper async handling and error logging.
+    
+    Args:
+        insights_data: Dictionary of financial insights to summarize
+        
+    Returns:
+        String summary or graceful fallback message
+    """
+    # Lazy initialization: ensure Groq is initialized before first use
+    _initialize_groq()
+    
+    if not _client:
+        logger.warning("Groq client not initialized — skipping LLM summary")
+        return "AI insights unavailable (API not configured)"
+    
+    try:
+        prompt = f"""You are a personal finance coach for Indian users.
+
+Based on this financial data:
+{insights_data}
+
+Provide:
+1. A 2–3 line summary of their financial health
+2. One practical, actionable suggestion
+
+Keep it simple, direct, and focused on Indian financial context."""
+
+        logger.debug(f"Calling Groq with prompt summary context: {list(insights_data.keys())}")
+        
+        response = await asyncio.wait_for(
+            _client.chat.completions.create(
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                model="llama-3.3-70b-versatile",
+            ),
+            timeout=10.0  # 10 second timeout for Groq call
+        )
+        
+        summary = response.choices[0].message.content.strip() if response.choices and response.choices[0].message.content else "No response from AI"
+        logger.info(f"Successfully generated AI summary ({len(summary)} chars)")
+        return summary
+        
+    except asyncio.TimeoutError:
+        error_msg = "AI summary generation timed out (>10s)"
+        logger.error(error_msg)
+        return f"{error_msg} — please try again"
+    except Exception as e:
+        error_type = type(e).__name__
+        error_str = str(e)
+        if "429" in error_str or "quota" in error_str.lower() or "rate" in error_str.lower():
+            logger.error(f"Groq quota/rate limit exhausted: {error_str[:100]}")  # type: ignore
+            return "AI summary unavailable: API quota exceeded. Please upgrade your plan."
+        else:
+            logger.exception(f"AI summary generation failed: {error_type}: {error_str}")
+            return f"AI summary unavailable: {error_type}"
 
 async def generate_all_insights(expenses: List[Dict[str, Any]], monthly_income: float = 0) -> Dict[str, Any]:
-    health = compute_financial_health_score(expenses, monthly_income)
-    anomalies = detect_anomalies(expenses)
-    patterns = detect_behavioral_patterns(expenses)
-    overspends = category_overspend(expenses)
-    savings = savings_opportunities(expenses)
-    trend = trend_analysis(expenses)
+    """Generate comprehensive financial insights with AI summary.
+    
+    Computes all insights (health, anomalies, patterns, trends, savings) and calls
+    Groq for natural language summary. Ensures response always includes ai_summary
+    with graceful degradation.
+    
+    Args:
+        expenses: List of expense dictionaries with keys: amount, category, date, merchant
+        monthly_income: User's monthly income for scoring
+        
+    Returns:
+        Dictionary with health, trend, anomalies, patterns, overspends, savings, ai_summary
+    """
+    logger.info(f"Generating insights for {len(expenses)} expenses, income=₹{monthly_income}")
+    
+    try:
+        # Compute all statistical insights (synchronous, fast)
+        health = compute_financial_health_score(expenses, monthly_income)
+        anomalies = detect_anomalies(expenses)
+        patterns = detect_behavioral_patterns(expenses)
+        overspends = category_overspend(expenses)
+        savings = savings_opportunities(expenses)
+        trend = trend_analysis(expenses)
+        
+        logger.debug(f"Statistical insights computed: health={health['score']}, anomalies={len(anomalies)}, patterns={len(patterns)}")
+        
+        # Build context for LLM
+        summary_ctx = {
+            "health_score": health["score"],
+            "savings_rate_pct": health["savings_rate"],
+            "total_spend_this_month": health.get("total_spend_this_month", 0),
+            "trend": trend.get("trend", "steady"),
+            "top_overspend_categories": [o["category"] for o in overspends[:3]],  # type: ignore
+            "behavioral_flags": [p["type"] for p in patterns],
+            "anomaly_count": len(anomalies),
+        }
+        
+        # Generate LLM summary (with error handling)
+        llm_summary = await generate_llm_summary(summary_ctx)
+        
+        result = {
+            "health": health,
+            "trend": trend,
+            "anomalies": anomalies,
+            "behavioral_patterns": patterns,
+            "category_overspends": overspends,
+            "savings_opportunities": savings,
+            "ai_summary": llm_summary,  # Always present
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        logger.info("Insights generation completed successfully")
+        return result
+        
+    except Exception as e:
+        # Fallback: return partial insights without LLM
+        logger.exception(f"Error generating insights: {type(e).__name__}: {str(e)}")
+        
+        # Ensure response structure is always consistent
+        return {
+            "health": {"score": 50, "savings_rate": 0, "stability": 0, "essential_ratio": 0},
+            "trend": {"current_month_spend": 0, "previous_month_spend": 0, "change_pct": 0, "trend": "unknown"},
+            "anomalies": [],
+            "behavioral_patterns": [],
+            "category_overspends": [],
+            "savings_opportunities": [],
+            "ai_summary": f"Insights generation encountered an error: {type(e).__name__}. Please refresh or contact support.",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "_error": True,  # Flag for frontend debugging
+        }
 
-    summary_ctx = {
-        "health_score": health["score"],
-        "savings_rate_pct": health["savings_rate"],
-        "total_spend_this_month": health.get("total_spend_this_month", 0),
-        "trend": trend,
-        "top_overspend_categories": [o["category"] for o in overspends[:3]],
-        "behavioral_flags": [p["type"] for p in patterns],
-        "anomaly_count": len(anomalies),
-    }
-    llm_summary = await generate_llm_summary(summary_ctx)
-
-    return {
-        "health": health,
-        "trend": trend,
-        "anomalies": anomalies,
-        "behavioral_patterns": patterns,
-        "category_overspends": overspends,
-        "savings_opportunities": savings,
-        "ai_summary": llm_summary,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }

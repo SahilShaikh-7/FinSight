@@ -6,9 +6,12 @@ import csv
 import uuid
 import asyncio
 import logging
+import insight_engine
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
+
+
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -44,6 +47,7 @@ api = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
 
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").lower().strip()
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
@@ -444,25 +448,62 @@ async def expense_summary(user=Depends(get_current_user), window: str = "30d"):
 # ---------------- Insights ----------------
 @api.get("/insights")
 async def get_insights(force: bool = False, user=Depends(get_current_user)):
-    # Use cache if fresh (< 60 minutes) unless force=true
+    """Generate comprehensive financial insights with AI summary.
+    
+    Query params:
+      - force=true: Bypass cache and regenerate from scratch
+      - force=false (default): Use cached result if <60 minutes old
+    """
+    # Check cache first if not forcing refresh
     if not force:
-        cached = await db.insights_cache.find_one({"user_id": user["id"]}, {"_id": 0})
-        if cached and cached.get("updated_at"):
-            try:
+        try:
+            cached = await db.insights_cache.find_one({"user_id": user["id"]}, {"_id": 0})
+            if cached and cached.get("updated_at"):
                 upd = datetime.fromisoformat(cached["updated_at"])
-                if datetime.now(timezone.utc) - upd < timedelta(minutes=60):
-                    return cached["data"]
-            except Exception:
-                pass
-    exps = await db.expenses.find({"user_id": user["id"]}, {"_id": 0, "user_id": 0}).to_list(5000)
-    u = await _user_doc(user["id"])
-    result = await generate_all_insights(exps, u.get("monthly_income", 0))
-    await db.insights_cache.update_one(
-        {"user_id": user["id"]},
-        {"$set": {"user_id": user["id"], "data": result, "updated_at": now_iso()}},
-        upsert=True,
-    )
-    return result
+                age_minutes = (datetime.now(timezone.utc) - upd).total_seconds() / 60
+                if age_minutes < 60:
+                    logger.info(f"Returning cached insights for user {user['id']} (age: {age_minutes:.0f}m)")
+                    return cached.get("data", {})
+        except Exception as e:
+            logger.warning(f"Error reading insights cache: {e}, proceeding with fresh generation")
+    
+    try:
+        # Fetch expenses and user profile
+        exps = await db.expenses.find({"user_id": user["id"]}, {"_id": 0, "user_id": 0}).to_list(5000)
+        u = await _user_doc(user["id"])
+        
+        logger.info(f"Generating insights for user {user['id']}: {len(exps)} expenses, \u20b9{u.get('monthly_income', 0)} income")
+        
+        # Generate all insights (includes AI summary)
+        result = await generate_all_insights(exps, u.get("monthly_income", 0))
+        
+        # Cache the result
+        try:
+            await db.insights_cache.update_one(
+                {"user_id": user["id"]},
+                {"$set": {"user_id": user["id"], "data": result, "updated_at": now_iso()}},
+                upsert=True,
+            )
+            logger.debug(f"Insights cached for user {user['id']}")
+        except Exception as cache_err:
+            logger.warning(f"Failed to cache insights: {cache_err} (returning result anyway)")
+        
+        return result
+        
+    except Exception as e:
+        logger.exception(f"Error generating insights for user {user['id']}: {type(e).__name__}: {str(e)}")
+        # Return minimal valid structure on error
+        return {
+            "health": {"score": 50, "savings_rate": 0, "stability": 0, "essential_ratio": 0},
+            "trend": {"current_month_spend": 0, "previous_month_spend": 0, "change_pct": 0, "trend": "unknown"},
+            "anomalies": [],
+            "behavioral_patterns": [],
+            "category_overspends": [],
+            "savings_opportunities": [],
+            "ai_summary": f"Unable to generate insights: {type(e).__name__}. Please try again.",
+            "generated_at": now_iso(),
+            "_error": True,
+        }
 
 
 @api.get("/insights/quick")
@@ -805,7 +846,7 @@ async def rzp_webhook(request: Request):
 async def root():
     return {"ok": True, "app": "Finance AI", "time": now_iso()}
 
-@api.api_route("/health", methods=["GET", "HEAD"])
+@api.api_route("/health", methods=["GET", "HEAD"], name="health_check")
 async def health():
     return {"ok": True}
 
