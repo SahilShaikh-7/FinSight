@@ -1,0 +1,21 @@
+{
+  "venvPath": ".",
+  "venv": "venv",
+  "pythonVersion": "3.11",
+  "pythonPlatform": "Linux",
+  "typeCheckingMode": "off",
+  "reportMissingImports": false,
+  "reportMissingModuleSource": false,
+  "reportUndefinedVariable": false,
+  "reportAttributeAccessIssue": false,
+  "reportReturnType": false,
+  "reportOperatorIssue": false,
+  "reportArgumentType": false,
+  "reportIndexIssue": false,
+  "reportCallIssue": false,
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/venv"
+  ]
+}

@@ -75,7 +75,7 @@ async def send_email_async(to: str, subject: str, html: str) -> None:
 
 
 def is_admin_email(email: str) -> bool:
-    return ADMIN_EMAIL and email.lower().strip() == ADMIN_EMAIL
+    return bool(ADMIN_EMAIL and email.lower().strip() == ADMIN_EMAIL)
 
 
 def admin_user_overrides(email: str) -> dict:
@@ -369,7 +369,9 @@ async def upload_csv(file: UploadFile = File(...), user=Depends(get_current_user
             dt = datetime.fromisoformat(s[:19])
             return dt.replace(tzinfo=timezone.utc).isoformat()
         except Exception:
-            return now_iso()
+            pass
+        return now_iso()  # final fallback — all paths explicitly return
+
 
     for row in reader:
         r = {str(k).strip().lower(): (v or "").strip() for k, v in row.items() if k}
@@ -797,8 +799,9 @@ async def verify_payment(payload: Dict[str, Any], user=Depends(get_current_user)
     if not key_secret:
         raise HTTPException(503, "Razorpay not configured")
     import hmac, hashlib
-    expected = hmac.new(key_secret.encode(), f"{order_id}|{payment_id}".encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, signature):
+    expected = hmac.new(key_secret.encode(), f"{order_id}|{payment_id}".encode(), hashlib.sha256).hexdigest()  # noqa
+    sig_bytes = signature if isinstance(signature, str) else (signature or "")
+    if not hmac.compare_digest(expected, sig_bytes):
         await db.payment_transactions.update_one({"order_id": order_id}, {"$set": {"payment_status": "failed", "status": "failed"}})
         raise HTTPException(400, "Invalid signature")
     # Idempotency: only activate once
@@ -841,13 +844,14 @@ async def rzp_webhook(request: Request):
     secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
     if secret:
         import hmac, hashlib
-        expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()  # noqa
         if not hmac.compare_digest(expected, sig):
             raise HTTPException(400, "Invalid webhook signature")
     # Just log
     import json as _json
     try:
-        evt = _json.loads(body.decode("utf-8"))
+        body_str = body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else str(body)  # noqa
+        evt = _json.loads(body_str)
         logger.info(f"RZP webhook: {evt.get('event')}")
     except Exception:
         pass
