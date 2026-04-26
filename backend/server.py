@@ -303,53 +303,84 @@ async def delete_expense(exp_id: str, user=Depends(get_current_user)):
 
 @api.post("/expenses/csv")
 async def upload_csv(file: UploadFile = File(...), user=Depends(get_current_user)):
-    """Accept bank-statement CSVs. Recognised columns (case-insensitive):
-      - Date columns: date, txn date, transaction date, value date, posting date
-      - Amount (debit): amount, debit, withdrawal, debit amount, dr
-      - Merchant/description: remarks, description, narration, particulars, merchant, details
-      - Notes (optional): notes, memo
-    Rows with only a 'Credit' value and no debit are treated as income and skipped.
+    """Accept bank-statement CSVs.
+    Supports the standard Indian bank statement format:
+      Sr No | Date | Remarks | Debit | Credit | Balance Amount
+    Also supports generic formats with amount/withdrawal columns.
+    Rows with blank Debit (credits/income) are skipped.
     """
     content = await file.read()
+    # Try UTF-8, fallback to latin-1 (common for Indian bank exports)
     try:
-        text = content.decode("utf-8", errors="ignore")
+        text = content.decode("utf-8-sig", errors="ignore")  # utf-8-sig strips BOM
     except Exception:
-        raise HTTPException(400, "Unable to read file")
-    # Skip preamble lines to find header (Bank statements often have account info at the top)
+        try:
+            text = content.decode("latin-1", errors="ignore")
+        except Exception:
+            raise HTTPException(400, "Unable to read file")
+
     lines = text.splitlines()
-    start_idx = 0
-    for i, line in enumerate(lines[:50]): # check first 50 lines max
-        line_lower = line.lower()
-        if "debit" in line_lower or "amount" in line_lower or "withdrawal" in line_lower or "dr" in line_lower:
-            start_idx = i
+
+    # ── Step 1: Find the header row ──────────────────────────────────────────
+    # The header row must contain a date-related word AND a debit/amount word.
+    # This correctly skips bank preamble lines (account number, branch info, etc.)
+    DATE_WORDS   = {"date", "dt", "txn date", "transaction date", "value date", "posting date"}
+    DEBIT_WORDS  = {"debit", "withdrawal", "dr", "amount", "withdrawl"}  # common bank typos too
+    AMOUNT_WORDS = DEBIT_WORDS | {"credit", "balance"}
+
+    header_idx = None
+    for i, line in enumerate(lines[:60]):
+        cols_lower = {c.strip().lower() for c in re.split(r"[,\t|;]", line)}
+        has_date   = bool(cols_lower & DATE_WORDS) or any("date" in c for c in cols_lower)
+        has_amount = bool(cols_lower & AMOUNT_WORDS) or any(
+            w in c for c in cols_lower for w in ("debit", "amount", "withdrawal")
+        )
+        if has_date and has_amount:
+            header_idx = i
             break
-            
-    clean_text = "\n".join(lines[start_idx:])
-    sample = clean_text[:2048]
-    
+
+    if header_idx is None:
+        # Last resort: use the first non-blank line
+        for i, line in enumerate(lines):
+            if line.strip():
+                header_idx = i
+                break
+
+    if header_idx is None:
+        raise HTTPException(400, "Could not find header row in CSV")
+
+    clean_text = "\n".join(lines[header_idx:])
+
+    # ── Step 2: Detect delimiter ─────────────────────────────────────────────
+    sample = clean_text[:4096]
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
     except Exception:
-        class _D:
-            delimiter = ","  # type: ignore
-        dialect = _D()
-    reader = csv.DictReader(io.StringIO(clean_text), dialect=dialect)
-    inserted = 0
-    skipped = 0
-    docs = []
+        # Count tabs vs commas in header to pick the most likely one
+        header_line = lines[header_idx]
+        if header_line.count("\t") >= header_line.count(","):
+            class _D:
+                delimiter = "\t"  # type: ignore
+        else:
+            class _D:  # type: ignore
+                delimiter = ","  # type: ignore
+        dialect = _D()  # type: ignore
 
+    reader = csv.DictReader(io.StringIO(clean_text), dialect=dialect)  # type: ignore
+
+    # ── Step 3: Helper functions ─────────────────────────────────────────────
     def _to_float(s: str) -> float:
         if s is None:
             return 0.0
-        s = str(s).strip().replace(",", "").replace("₹", "").replace("INR", "").replace("Rs.", "").replace("Rs", "").strip()
-        # Strip Dr/Cr suffix
-        s_lower = s.lower()
-        if s_lower.endswith("dr") or s_lower.endswith("cr") or s_lower.endswith("(dr)") or s_lower.endswith("(cr)"):
-            s = re.sub(r"\s*\(?(dr|cr)\)?$", "", s, flags=re.IGNORECASE).strip()
-        if not s or s in ("-", "NA", "N/A"):
+        s = str(s).strip()
+        # Remove currency symbols and labels
+        s = s.replace(",", "").replace("₹", "").replace("INR", "").replace("Rs.", "").replace("Rs", "").strip()
+        # Strip Dr/Cr suffix (e.g. "1500.00 Dr")
+        s = re.sub(r"\s*\(?(dr|cr)\)?$", "", s, flags=re.IGNORECASE).strip()
+        if not s or s in ("-", "NA", "N/A", "nil", "NIL"):
             return 0.0
         try:
-            return float(s)
+            return abs(float(s))
         except Exception:
             return 0.0  # type: ignore
 
@@ -357,8 +388,11 @@ async def upload_csv(file: UploadFile = File(...), user=Depends(get_current_user
         if not s:
             return now_iso()
         s = str(s).strip().split(" ")[0]
-        fmts = ["%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y",
-                "%d %b %Y", "%d-%b-%Y", "%d-%b-%y", "%d %B %Y", "%m/%d/%Y"]
+        fmts = [
+            "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%y", "%d-%m-%y",
+            "%d %b %Y", "%d-%b-%Y", "%d-%b-%y", "%d %B %Y", "%m/%d/%Y",
+            "%d-%b-%y", "%d %b %y",
+        ]
         for f in fmts:  # type: ignore
             try:
                 dt = datetime.strptime(s, f)
@@ -370,30 +404,57 @@ async def upload_csv(file: UploadFile = File(...), user=Depends(get_current_user
             return dt.replace(tzinfo=timezone.utc).isoformat()
         except Exception:
             pass
-        return now_iso()  # final fallback — all paths explicitly return
+        return now_iso()  # type: ignore
 
+    # ── Step 4: Process rows ─────────────────────────────────────────────────
+    inserted = 0
+    skipped  = 0
+    docs     = []
 
     for row in reader:
-        r = {str(k).strip().lower(): (v or "").strip() for k, v in row.items() if k}
-        # Amount: prefer debit; fallback to amount
-        amt_str = r.get("debit") or r.get("withdrawal") or r.get("debit amount") or r.get("dr") or r.get("amount") or ""
-        amt = _to_float(amt_str)
-        if amt <= 0:
-            # Skip credits / blank / balance-only rows
+        # Normalize all keys to lowercase stripped strings
+        r = {str(k).strip().lower(): (str(v) if v is not None else "").strip()
+             for k, v in row.items() if k and str(k).strip()}
+
+        if not r:
             skipped += 1
             continue
+
+        # ── Amount: try debit columns first, then generic amount ──
+        # Bank statement format: "debit" column is empty for credits
+        debit_val  = (r.get("debit") or r.get("withdrawal") or r.get("withdrawl")
+                      or r.get("debit amount") or r.get("dr") or "").strip()
+        amount_val = (r.get("amount") or "").strip()
+
+        amt = _to_float(debit_val) if debit_val else _to_float(amount_val)
+
+        if amt <= 0:
+            # Pure credit or balance-only row — skip
+            skipped += 1
+            continue
+
+        # ── Date ──
+        date_str = (
+            r.get("date") or r.get("txn date") or r.get("transaction date")
+            or r.get("value date") or r.get("posting date") or r.get("dt") or ""
+        )
+        date_iso = _parse_date(date_str)
+
+        # ── Merchant / description ──
         merchant = (
             r.get("remarks") or r.get("description") or r.get("narration")
-            or r.get("particulars") or r.get("merchant") or r.get("details") or r.get("transaction details") or ""
+            or r.get("particulars") or r.get("merchant") or r.get("details")
+            or r.get("transaction details") or r.get("transaction remarks")
+            or r.get("cheque no./reference no.") or ""
         )
+
         notes = r.get("notes") or r.get("memo") or ""  # type: ignore
-        date_str = r.get("date") or r.get("txn date") or r.get("transaction date") or r.get("value date") or r.get("posting date") or ""
-        date_iso = _parse_date(date_str)
         category = r.get("category") or categorize(merchant, notes)
+
         docs.append({  # type: ignore
             "id": str(uuid.uuid4()),
             "user_id": user["id"],
-            "amount": amt,
+            "amount": round(amt, 2),
             "merchant": merchant[:200],
             "category": category,
             "date": date_iso,
@@ -401,12 +462,17 @@ async def upload_csv(file: UploadFile = File(...), user=Depends(get_current_user
             "essential": is_essential(category),  # type: ignore
             "created_at": now_iso(),  # type: ignore
         })
+
     if docs:
         await db.expenses.insert_many(docs)
         inserted = len(docs)
-    # Invalidate insights cache for this user so fresh data is used
+
+    # Invalidate insights cache so fresh data is used
     await db.insights_cache.delete_one({"user_id": user["id"]})
+
+    logger.info(f"CSV upload: inserted={inserted}, skipped={skipped}, user={user['id']}, header_idx={header_idx}")
     return {"inserted": inserted, "skipped": skipped}
+
 
 @api.get("/expenses/summary")
 async def expense_summary(user=Depends(get_current_user), window: str = "30d"):
