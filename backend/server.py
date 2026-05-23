@@ -1017,7 +1017,10 @@ app.include_router(api)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_origins=[
+        "http://localhost:3000",
+        "https://finsight-webapp.vercel.app",
+    ],,
     allow_methods=["*"],
     allow_headers=["*"],
 )
