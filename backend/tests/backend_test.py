@@ -1,8 +1,4 @@
-"""Backend API tests for PaisaIQ Personal Finance AI.
 
-Covers: auth, expenses (CRUD + CSV + summary), insights, portfolio (with live
-prices), MF search, affiliates, subscription plans/order (Razorpay 503).
-"""
 import io
 import os
 import time
@@ -10,7 +6,7 @@ import uuid
 import pytest
 import requests
 
-BASE_URL = os.environ.get("BACKEND_BASE_URL") or "https://rupee-optimizer.preview.emergentagent.com"
+BASE_URL = os.environ.get("BACKEND_BASE_URL") 
 BASE_URL = BASE_URL.rstrip("/")
 
 # -------- Fixtures --------
